@@ -86,3 +86,5 @@ class handler(BaseHTTPRequestHandler):
                     self.send_error(502, f"Streaming error: {e}")
                 except Exception:
                     pass
+
+app = handler

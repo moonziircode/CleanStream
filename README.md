@@ -14,7 +14,7 @@ Sangat optimal untuk:
 Buka terminal di direktori ini, lalu jalankan:
 
 ```bash
-python3 server.py
+python3 scripts/local_server.py
 ```
 
 Server akan langsung aktif dan menampilkan alamat akses:

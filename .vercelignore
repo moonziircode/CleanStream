@@ -1,0 +1,6 @@
+server.py
+local_server.py
+scripts/
+.DS_Store
+*.log
+README.md
