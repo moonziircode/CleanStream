@@ -1,9 +1,13 @@
-from http.server import BaseHTTPRequestHandler
+from flask import Flask, request, jsonify, Response
+from flask_cors import CORS
 import urllib.request
 import urllib.parse
 import json
 import re
 import time
+
+app = Flask(__name__)
+CORS(app)
 
 def fetch_with_retry(req, retries=3, delay=1.0):
     for attempt in range(retries):
@@ -89,128 +93,70 @@ def extract_video_info(input_url_or_id):
         "embed_url": embed_url
     }
 
-class handler(BaseHTTPRequestHandler):
-    def do_HEAD(self):
-        parsed = urllib.parse.urlparse(self.path)
-        path = parsed.path
-        query = urllib.parse.parse_qs(parsed.query)
+@app.route("/api/resolve", methods=["GET"])
+def resolve_endpoint():
+    url = request.args.get("url")
+    if not url:
+        return jsonify({"status": "error", "message": "Parameter url diperlukan"}), 400
+    try:
+        info = extract_video_info(url)
+        return jsonify({"status": "ok", **info})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
-        if "stream" in path:
-            raw_url = query.get("url", [""])[0]
-            if not raw_url:
-                self.send_error(400)
-                return
+@app.route("/api/stream", methods=["GET", "HEAD"])
+def stream_endpoint():
+    raw_url = request.args.get("url")
+    if not raw_url:
+        return "Parameter url diperlukan", 400
 
-            req_headers = {
-                "User-Agent": "Mozilla/5.0",
-                "Referer": "https://streamrizz.com/"
-            }
-            range_header = self.headers.get("Range")
-            if range_header:
-                req_headers["Range"] = range_header
+    range_header = request.headers.get("Range")
+    req_headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": "https://streamrizz.com/"
+    }
+    if range_header:
+        req_headers["Range"] = range_header
 
+    req = urllib.request.Request(raw_url, headers=req_headers)
+    try:
+        remote_resp = urllib.request.urlopen(req, timeout=15)
+        status_code = remote_resp.status
+
+        if request.method == "HEAD":
+            resp = Response(status=status_code)
+            for h in ["Content-Type", "Content-Range", "Content-Length", "Accept-Ranges", "Last-Modified", "ETag"]:
+                val = remote_resp.headers.get(h)
+                if val:
+                    resp.headers[h] = val
+            resp.headers["Accept-Ranges"] = "bytes"
+            resp.headers["Access-Control-Allow-Origin"] = "*"
+            return resp
+
+        def generate():
             try:
-                req = urllib.request.Request(raw_url, headers=req_headers, method="HEAD")
-                with urllib.request.urlopen(req, timeout=10) as resp:
-                    self.send_response(resp.status)
-                    for h in ["Content-Type", "Content-Range", "Content-Length", "Accept-Ranges", "Last-Modified", "ETag"]:
-                        val = resp.headers.get(h)
-                        if val:
-                            self.send_header(h, val)
-                    self.send_header("Access-Control-Allow-Origin", "*")
-                    self.end_headers()
-            except Exception:
-                self.send_error(502)
-            return
-
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.end_headers()
-
-    def do_GET(self):
-        parsed = urllib.parse.urlparse(self.path)
-        path = parsed.path
-        query = urllib.parse.parse_qs(parsed.query)
-
-        # Route 1: Resolve Video
-        if "resolve" in path:
-            url_param = query.get("url", [""])[0]
-            if not url_param:
-                self.send_json({"status": "error", "message": "Parameter url diperlukan"}, status=400)
-                return
-
-            try:
-                info = extract_video_info(url_param)
-                self.send_json({"status": "ok", **info})
-            except Exception as e:
-                self.send_json({"status": "error", "message": str(e)}, status=500)
-            return
-
-        # Route 2: Stream Video with Proxy
-        if "stream" in path:
-            raw_url = query.get("url", [""])[0]
-            if not raw_url:
-                self.send_error(400, "Parameter url diperlukan")
-                return
-
-            self.proxy_stream(raw_url)
-            return
-
-        # Fallback
-        self.send_json({"status": "ok", "message": "CleanStream API is running"})
-
-    def proxy_stream(self, remote_url):
-        range_header = self.headers.get("Range")
-        req_headers = {
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Referer": "https://streamrizz.com/"
-        }
-        if range_header:
-            req_headers["Range"] = range_header
-
-        req = urllib.request.Request(remote_url, headers=req_headers)
-        
-        try:
-            with urllib.request.urlopen(req, timeout=15) as remote_resp:
-                self.send_response(remote_resp.status)
-
-                for h in ["Content-Type", "Content-Range", "Content-Length", "Accept-Ranges", "Last-Modified", "ETag"]:
-                    val = remote_resp.headers.get(h)
-                    if val:
-                        self.send_header(h, val)
-
-                self.send_header("Access-Control-Allow-Origin", "*")
-                self.send_header("Access-Control-Allow-Headers", "*")
-                if not remote_resp.headers.get("Accept-Ranges"):
-                    self.send_header("Accept-Ranges", "bytes")
-                if not remote_resp.headers.get("Content-Type"):
-                    self.send_header("Content-Type", "video/mp4")
-
-                self.end_headers()
-
-                chunk_size = 64 * 1024
                 while True:
-                    chunk = remote_resp.read(chunk_size)
+                    chunk = remote_resp.read(64 * 1024)
                     if not chunk:
                         break
-                    self.wfile.write(chunk)
-        except (BrokenPipeError, ConnectionResetError):
-            pass
-        except Exception as e:
-            if not self.wfile.closed:
-                try:
-                    self.send_error(502, f"Streaming error: {e}")
-                except Exception:
-                    pass
+                    yield chunk
+            finally:
+                remote_resp.close()
 
-    def send_json(self, data, status=200):
-        body = json.dumps(data).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.end_headers()
-        self.wfile.write(body)
+        resp = Response(generate(), status=status_code)
+        for h in ["Content-Type", "Content-Range", "Content-Length", "Accept-Ranges", "Last-Modified", "ETag"]:
+            val = remote_resp.headers.get(h)
+            if val:
+                resp.headers[h] = val
+        resp.headers["Accept-Ranges"] = "bytes"
+        resp.headers["Access-Control-Allow-Origin"] = "*"
+        return resp
+    except Exception as e:
+        return f"Streaming error: {e}", 502
+
+@app.route("/api", methods=["GET"])
+def health():
+    return jsonify({"status": "ok", "service": "CleanStream API"})
 
 # Vercel entrypoint aliases
-app = handler
+handler = app

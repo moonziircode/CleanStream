@@ -30,7 +30,6 @@
       max-height: 70vh;
       width: 100%;
     }
-    /* Custom scrollbar */
     ::-webkit-scrollbar { width: 6px; height: 6px; }
     ::-webkit-scrollbar-track { background: #09090b; }
     ::-webkit-scrollbar-thumb { background: #27272a; border-radius: 4px; }
@@ -74,7 +73,7 @@
           <input 
             type="text" 
             id="urlInput" 
-            placeholder="https://streamrizz.com/e/l4mvca58up19..." 
+            placeholder="https://streamrizz.com/e/..." 
             value="https://streamrizz.com/e/l4mvca58up19"
             class="w-full bg-zinc-900/90 border border-zinc-700/70 rounded-xl px-4 py-3 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:ring-2 focus:ring-rose-500 focus:border-transparent transition"
             onkeydown="if(event.key==='Enter') resolveVideo()"
@@ -102,6 +101,9 @@
         <span>Contoh Cepat:</span>
         <button onclick="setSample('https://streamrizz.com/e/l4mvca58up19')" class="px-2 py-0.5 rounded bg-zinc-800/80 hover:bg-zinc-700 text-zinc-300 transition">
           l4mvca58up19
+        </button>
+        <button onclick="setSample('https://streamrizz.com/e/j1jcke4eucd8')" class="px-2 py-0.5 rounded bg-zinc-800/80 hover:bg-zinc-700 text-zinc-300 transition">
+          j1jcke4eucd8
         </button>
       </div>
     </div>
@@ -170,9 +172,7 @@
         </h2>
         <button onclick="clearHistory()" class="text-xs text-zinc-500 hover:text-zinc-300 transition">Hapus</button>
       </div>
-      <div id="historyList" class="flex flex-col gap-2">
-        <!-- Rendered by JS -->
-      </div>
+      <div id="historyList" class="flex flex-col gap-2"></div>
     </div>
 
   </main>
@@ -204,10 +204,8 @@
     const currentOrigin = window.location.origin;
     let currentStreamUrl = "";
 
-    // Init icons
     lucide.createIcons();
 
-    // Init QR code
     document.getElementById('lblLanUrl').textContent = currentOrigin;
     new QRCode(document.getElementById("qrcode"), {
       text: currentOrigin,
@@ -254,6 +252,12 @@
 
       try {
         const res = await fetch(`/api/resolve?url=${encodeURIComponent(input)}`);
+        const contentType = res.headers.get("content-type") || "";
+        if (!contentType.includes("application/json")) {
+          const text = await res.text();
+          throw new Error(`Server error (${res.status}): ${text.slice(0, 120)}`);
+        }
+
         const data = await res.json();
 
         if (data.status !== "ok") {
@@ -263,12 +267,11 @@
         const streamUrl = `/api/stream?url=${encodeURIComponent(data.raw_mp4)}`;
         currentStreamUrl = `${window.location.origin}${streamUrl}`;
 
-        // Setup player
         videoPlayer.poster = data.poster || "";
         videoPlayer.src = streamUrl;
         
         document.getElementById('lblVideoId').textContent = `ID: ${data.video_id}`;
-        document.getElementById('lblRawSource').textContent = `Source: ${data.raw_mp4}`;
+        document.getElementById('lblRawSource').textContent = `Source: ${data.original_name || data.raw_mp4}`;
         
         const btnDownload = document.getElementById('btnDownload');
         btnDownload.href = streamUrl;
@@ -277,12 +280,10 @@
         playerSection.classList.remove('hidden');
         lucide.createIcons();
 
-        // Auto play
         videoPlayer.play().catch(() => {
           console.log("Autoplay dicegah oleh browser, silakan klik tombol play manual.");
         });
 
-        // Save history
         saveToHistory({
           id: data.video_id,
           raw_mp4: data.raw_mp4,
@@ -351,7 +352,6 @@
       renderHistory();
     }
 
-    // On Load
     renderHistory();
   </script>
 </body>
