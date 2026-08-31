@@ -123,8 +123,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <title>CleanStream Player - Bebas Iklan & Pop-Up</title>
+  <!-- Tailwind CSS CDN -->
   <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Lucide Icons -->
   <script src="https://unpkg.com/lucide@latest"></script>
+  <!-- QRCode.js -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
   <style>
     body {
@@ -146,6 +149,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       max-height: 70vh;
       width: 100%;
     }
+    /* Custom scrollbar */
     ::-webkit-scrollbar { width: 6px; height: 6px; }
     ::-webkit-scrollbar-track { background: #09090b; }
     ::-webkit-scrollbar-thumb { background: #27272a; border-radius: 4px; }
@@ -189,8 +193,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           <input 
             type="text" 
             id="urlInput" 
-            placeholder="https://streamrizz.com/e/..." 
-            value="https://streamrizz.com/e/j1jcke4eucd8"
+            placeholder="Tempel tautan video di sini..." 
+            value=""
             class="w-full bg-zinc-900/90 border border-zinc-700/70 rounded-xl px-4 py-3 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:ring-2 focus:ring-rose-500 focus:border-transparent transition"
             onkeydown="if(event.key==='Enter') resolveVideo()"
           >
@@ -209,17 +213,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         >
           <i data-lucide="play-circle" class="w-4 h-4"></i>
           <span>Putar Sekarang</span>
-        </button>
-      </div>
-
-      <!-- Quick sample pills -->
-      <div class="mt-3 flex items-center gap-2 flex-wrap text-xs text-zinc-400">
-        <span>Contoh Cepat:</span>
-        <button onclick="setSample('https://streamrizz.com/e/l4mvca58up19')" class="px-2 py-0.5 rounded bg-zinc-800/80 hover:bg-zinc-700 text-zinc-300 transition">
-          l4mvca58up19
-        </button>
-        <button onclick="setSample('https://streamrizz.com/e/j1jcke4eucd8')" class="px-2 py-0.5 rounded bg-zinc-800/80 hover:bg-zinc-700 text-zinc-300 transition">
-          j1jcke4eucd8
         </button>
       </div>
     </div>
@@ -301,13 +294,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       </div>
       <h3 class="text-lg font-bold text-white mb-1">Buka di iPhone / iPad</h3>
       <p class="text-xs text-zinc-400 mb-5 leading-relaxed">
-        Pastikan iPhone terhubung ke jaringan Wi-Fi yang sama, lalu scan kode QR ini dengan kamera iPhone:
+        Scan kode QR ini menggunakan kamera iPhone untuk membuka pemutar langsung di perangkat Anda:
       </p>
 
       <div id="qrcode" class="p-3 bg-white rounded-2xl mb-4 shadow-inner flex items-center justify-center"></div>
 
       <div class="w-full bg-zinc-900/90 rounded-xl p-2.5 mb-5 font-mono text-xs text-zinc-300 truncate border border-zinc-800" id="lblLanUrl">
-        http://...
+        ...
       </div>
 
       <button onclick="toggleQRModal()" class="w-full py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-white text-xs font-medium transition">
@@ -317,17 +310,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   </div>
 
   <script>
-    const LOCAL_IP = "__LOCAL_IP__";
-    const PORT = "__PORT__";
-    const LAN_BASE = `http://${LOCAL_IP}:${PORT}`;
-
+    const currentOrigin = window.location.origin;
     let currentStreamUrl = "";
 
     lucide.createIcons();
 
-    document.getElementById('lblLanUrl').textContent = LAN_BASE;
+    document.getElementById('lblLanUrl').textContent = currentOrigin;
     new QRCode(document.getElementById("qrcode"), {
-      text: LAN_BASE,
+      text: currentOrigin,
       width: 180,
       height: 180,
       colorDark : "#000000",
@@ -340,8 +330,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       modal.classList.toggle('hidden');
     }
 
-    function setSample(url) {
-      document.getElementById('urlInput').value = url;
+    function replayHistory(idOrUrl) {
+      document.getElementById('urlInput').value = idOrUrl;
       resolveVideo();
     }
 
@@ -371,13 +361,19 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
       try {
         const res = await fetch(`/api/resolve?url=${encodeURIComponent(input)}`);
+        const contentType = res.headers.get("content-type") || "";
+        if (!contentType.includes("application/json")) {
+          const text = await res.text();
+          throw new Error(`Server error (${res.status}): ${text.slice(0, 120)}`);
+        }
+
         const data = await res.json();
 
         if (data.status !== "ok") {
           throw new Error(data.message || "Gagal memproses URL");
         }
 
-        const streamUrl = `/stream?url=${encodeURIComponent(data.raw_mp4)}`;
+        const streamUrl = `/api/stream?url=${encodeURIComponent(data.raw_mp4)}`;
         currentStreamUrl = `${window.location.origin}${streamUrl}`;
 
         videoPlayer.poster = data.poster || "";
@@ -444,7 +440,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
       card.classList.remove('hidden');
       list.innerHTML = history.map(h => `
-        <div onclick="setSample('${h.id}')" class="flex items-center justify-between p-2.5 rounded-xl bg-zinc-900/60 hover:bg-zinc-800/80 cursor-pointer border border-zinc-800/60 transition group">
+        <div onclick="replayHistory('${h.id}')" class="flex items-center justify-between p-2.5 rounded-xl bg-zinc-900/60 hover:bg-zinc-800/80 cursor-pointer border border-zinc-800/60 transition group">
           <div class="flex items-center gap-3">
             <div class="w-8 h-8 rounded-lg bg-zinc-800 flex items-center justify-center text-zinc-400 group-hover:text-rose-400 transition">
               <i data-lucide="film" class="w-4 h-4"></i>
