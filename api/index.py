@@ -141,7 +141,7 @@ def handle_stream():
             finally:
                 remote_resp.close()
 
-        resp = Response(generate(), status=status_code)
+        resp = Response(generate(), status=status_code, mimetype="video/mp4")
         for h in ["Content-Type", "Content-Range", "Content-Length", "Accept-Ranges", "Last-Modified", "ETag"]:
             val = remote_resp.headers.get(h)
             if val:
@@ -163,15 +163,19 @@ def route_resolve():
 def route_stream():
     return handle_stream()
 
-# Catch-all Route Dispatcher (Handles Vercel rewrites or direct API calls)
+# Catch-all Route Dispatcher
 @app.route("/", defaults={"path": ""}, methods=["GET", "HEAD"])
 @app.route("/<path:path>", methods=["GET", "HEAD"])
 def route_catch_all(path):
     p = (request.path or "").lower()
-    if "stream" in p:
+    u = (request.args.get("url") or "").lower()
+    
+    # Check if stream or resolve based on URL content and path
+    if "stream" in p or ".mp4" in u or "overfetch" in u:
         return handle_stream()
-    elif "resolve" in p or "url" in request.args:
+    elif "resolve" in p or "streamrizz" in u or "vidoy" in u or "url" in request.args:
         return handle_resolve()
+        
     return jsonify({"status": "ok", "service": "CleanStream API", "path": request.path})
 
 handler = app
