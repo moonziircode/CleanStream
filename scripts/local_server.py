@@ -165,7 +165,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           CleanStream
           <span class="text-xs px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-medium">Anti-PopUp</span>
         </h1>
-        <p class="text-xs text-zinc-400">Pemutar video Streamrizz & Vidoy bebas iklan untuk iPhone & Desktop</p>
+        <p class="text-xs text-zinc-400">Pemutar video streaming bebas iklan untuk iPhone & Desktop</p>
       </div>
     </div>
     <div class="flex items-center gap-2">
@@ -182,7 +182,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <!-- Input Form Card -->
     <div class="glass p-5 rounded-2xl shadow-xl">
       <label class="block text-xs font-semibold text-zinc-300 uppercase tracking-wider mb-2">
-        Masukkan Tautan Streamrizz / Vidoy
+        Masukkan Tautan Video
       </label>
       <div class="flex flex-col sm:flex-row gap-3">
         <div class="relative flex-1">
