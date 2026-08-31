@@ -93,8 +93,7 @@ def extract_video_info(input_url_or_id):
         "embed_url": embed_url
     }
 
-@app.route("/api/resolve", methods=["GET"])
-def resolve_endpoint():
+def handle_resolve():
     url = request.args.get("url")
     if not url:
         return jsonify({"status": "error", "message": "Parameter url diperlukan"}), 400
@@ -104,8 +103,7 @@ def resolve_endpoint():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
-@app.route("/api/stream", methods=["GET", "HEAD"])
-def stream_endpoint():
+def handle_stream():
     raw_url = request.args.get("url")
     if not raw_url:
         return "Parameter url diperlukan", 400
@@ -154,9 +152,26 @@ def stream_endpoint():
     except Exception as e:
         return f"Streaming error: {e}", 502
 
-@app.route("/api", methods=["GET"])
-def health():
-    return jsonify({"status": "ok", "service": "CleanStream API"})
+# Explicit Routes
+@app.route("/api/resolve", methods=["GET"])
+@app.route("/resolve", methods=["GET"])
+def route_resolve():
+    return handle_resolve()
 
-# Vercel entrypoint aliases
+@app.route("/api/stream", methods=["GET", "HEAD"])
+@app.route("/stream", methods=["GET", "HEAD"])
+def route_stream():
+    return handle_stream()
+
+# Catch-all Route Dispatcher (Handles Vercel rewrites or direct API calls)
+@app.route("/", defaults={"path": ""}, methods=["GET", "HEAD"])
+@app.route("/<path:path>", methods=["GET", "HEAD"])
+def route_catch_all(path):
+    p = (request.path or "").lower()
+    if "stream" in p:
+        return handle_stream()
+    elif "resolve" in p or "url" in request.args:
+        return handle_resolve()
+    return jsonify({"status": "ok", "service": "CleanStream API", "path": request.path})
+
 handler = app
