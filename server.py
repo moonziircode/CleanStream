@@ -9,6 +9,7 @@ import http.server
 import socketserver
 import urllib.request
 import urllib.parse
+import time
 import json
 import re
 import socket
@@ -28,16 +29,22 @@ def get_local_ip():
     except Exception:
         return "127.0.0.1"
 
+def fetch_with_retry(req, retries=3, delay=1.0):
+    import time
+    for attempt in range(retries):
+        try:
+            return urllib.request.urlopen(req, timeout=12)
+        except (urllib.error.HTTPError, urllib.error.URLError) as e:
+            if attempt == retries - 1:
+                raise
+            time.sleep(delay)
+
 def extract_video_info(input_url_or_id):
     """
     Extracts direct MP4 URL, thumbnail, and metadata from a Streamrizz or Vidoy link/ID.
     """
-    # Normalize input
     input_str = input_url_or_id.strip()
-    
-    # Extract video ID
     if "http" in input_str:
-        # Match /e/ID, /v/ID, /embed/ID, /d/ID or last segment
         m = re.search(r"(?:/e/|/v/|/embed/|/d/|/)([a-zA-Z0-9_-]{6,32})(?:[/?#]|$)", input_str)
         if m:
             video_id = m.group(1)
@@ -53,13 +60,13 @@ def extract_video_info(input_url_or_id):
         "Referer": "https://streamrizz.com/"
     }
     
-    # Step 1: Fetch embed page
+    # 1. Fetch embed page
     req = urllib.request.Request(embed_url, headers=headers)
-    with urllib.request.urlopen(req, timeout=10) as resp:
+    with fetch_with_retry(req) as resp:
         embed_html = resp.read().decode("utf-8")
         
-    iframe_id_match = re.search(r"var iframeId = ['\"]([a-f0-9]+)['\"]", embed_html)
-    embed_token_match = re.search(r"var embedToken = ['\"]([^'\"]+)['\"]", embed_html)
+    iframe_id_match = re.search(r"var iframeId = [\'\"]([a-f0-9]+)[\'\"]", embed_html)
+    embed_token_match = re.search(r"var embedToken = [\'\"]([^\'\"]+)[\'\"]", embed_html)
     
     if not iframe_id_match or not embed_token_match:
         raise ValueError(f"Gagal mengekstrak token dari embed page (Video ID: {video_id})")
@@ -67,38 +74,45 @@ def extract_video_info(input_url_or_id):
     iframe_id = iframe_id_match.group(1)
     embed_token = embed_token_match.group(1)
     
-    # Step 2: Fetch iframe /ip129jk
+    # 2. Fetch iframe /ip129jk
     iframe_url = f"https://streamrizz.com/ip129jk?id={iframe_id}&t={embed_token}"
     headers["Referer"] = embed_url
     req2 = urllib.request.Request(iframe_url, headers=headers)
-    with urllib.request.urlopen(req2, timeout=10) as resp2:
+    with fetch_with_retry(req2) as resp2:
         iframe_html = resp2.read().decode("utf-8")
         
-    player_path_match = re.search(r"playerPath\s*=\s*['\"]([^'\"]+)['\"]", iframe_html)
+    player_path_match = re.search(r"playerPath\s*=\s*[\'\"]([^\'\"]+)[\'\"]", iframe_html)
     if not player_path_match:
         raise ValueError("Gagal menemukan playerPath di halaman iframe")
         
     player_path = player_path_match.group(1).replace(r"\u0026", "&")
     
-    # Step 3: Fetch stream player page
+    # 3. Fetch stream player page
     headers["Referer"] = iframe_url
     req3 = urllib.request.Request(player_path, headers=headers)
-    with urllib.request.urlopen(req3, timeout=10) as resp3:
+    with fetch_with_retry(req3) as resp3:
         stream_html = resp3.read().decode("utf-8")
         
-    # Extract MP4 direct source and poster
-    source_match = re.search(r"<source\s+src=['\"](https?://[^'\"\s>]+\.mp4)['\"]", stream_html)
-    poster_match = re.search(r"poster=['\"](https?://[^'\"\s>]+)['\"]", stream_html)
+    source_match = re.search(r"<source\s+[^>]*src=[\'\"]([^\'\"]+)[\'\"]", stream_html)
+    if not source_match:
+        source_match = re.search(r"<video\s+[^>]*src=[\'\"]([^\'\"]+)[\'\"]", stream_html)
+
+    poster_match = re.search(r"poster=[\'\"]([^\'\"]+)[\'\"]", stream_html)
+    title_match = re.search(r"<title>(.*?)</title>", stream_html)
     
     if not source_match:
-        raise ValueError("Gagal menemukan sumber video MP4 langsung")
+        raise ValueError("Gagal menemukan sumber video langsung pada halaman player")
         
-    raw_mp4 = source_match.group(1)
+    raw_mp4 = source_match.group(1).strip()
+    encoded_mp4 = urllib.parse.quote(raw_mp4, safe=":/%?=&@#+~")
     poster = poster_match.group(1) if poster_match else f"https://i.streamrizz.com/image/{video_id}.jpg"
-    
+    title = title_match.group(1).strip() if title_match else video_id
+
     return {
         "video_id": video_id,
-        "raw_mp4": raw_mp4,
+        "title": title,
+        "raw_mp4": encoded_mp4,
+        "original_name": raw_mp4.split("/")[-1],
         "poster": poster,
         "embed_url": embed_url
     }
@@ -109,11 +123,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <title>CleanStream Player - Bebas Iklan & Pop-Up</title>
-  <!-- Tailwind CSS CDN -->
   <script src="https://cdn.tailwindcss.com"></script>
-  <!-- Lucide Icons -->
   <script src="https://unpkg.com/lucide@latest"></script>
-  <!-- QRCode.js for iPhone quick sharing -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
   <style>
     body {
@@ -135,7 +146,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       max-height: 70vh;
       width: 100%;
     }
-    /* Custom scrollbar */
     ::-webkit-scrollbar { width: 6px; height: 6px; }
     ::-webkit-scrollbar-track { background: #09090b; }
     ::-webkit-scrollbar-thumb { background: #27272a; border-radius: 4px; }
@@ -179,8 +189,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           <input 
             type="text" 
             id="urlInput" 
-            placeholder="https://streamrizz.com/e/l4mvca58up19..." 
-            value="https://streamrizz.com/e/l4mvca58up19"
+            placeholder="https://streamrizz.com/e/..." 
+            value="https://streamrizz.com/e/j1jcke4eucd8"
             class="w-full bg-zinc-900/90 border border-zinc-700/70 rounded-xl px-4 py-3 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:ring-2 focus:ring-rose-500 focus:border-transparent transition"
             onkeydown="if(event.key==='Enter') resolveVideo()"
           >
@@ -207,6 +217,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         <span>Contoh Cepat:</span>
         <button onclick="setSample('https://streamrizz.com/e/l4mvca58up19')" class="px-2 py-0.5 rounded bg-zinc-800/80 hover:bg-zinc-700 text-zinc-300 transition">
           l4mvca58up19
+        </button>
+        <button onclick="setSample('https://streamrizz.com/e/j1jcke4eucd8')" class="px-2 py-0.5 rounded bg-zinc-800/80 hover:bg-zinc-700 text-zinc-300 transition">
+          j1jcke4eucd8
         </button>
       </div>
     </div>
@@ -275,9 +288,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         </h2>
         <button onclick="clearHistory()" class="text-xs text-zinc-500 hover:text-zinc-300 transition">Hapus</button>
       </div>
-      <div id="historyList" class="flex flex-col gap-2">
-        <!-- Rendered by JS -->
-      </div>
+      <div id="historyList" class="flex flex-col gap-2"></div>
     </div>
 
   </main>
@@ -312,10 +323,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
     let currentStreamUrl = "";
 
-    // Init icons
     lucide.createIcons();
 
-    // Init QR code
     document.getElementById('lblLanUrl').textContent = LAN_BASE;
     new QRCode(document.getElementById("qrcode"), {
       text: LAN_BASE,
@@ -371,12 +380,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         const streamUrl = `/stream?url=${encodeURIComponent(data.raw_mp4)}`;
         currentStreamUrl = `${window.location.origin}${streamUrl}`;
 
-        // Setup player
         videoPlayer.poster = data.poster || "";
         videoPlayer.src = streamUrl;
         
         document.getElementById('lblVideoId').textContent = `ID: ${data.video_id}`;
-        document.getElementById('lblRawSource').textContent = `Source: ${data.raw_mp4}`;
+        document.getElementById('lblRawSource').textContent = `Source: ${data.original_name || data.raw_mp4}`;
         
         const btnDownload = document.getElementById('btnDownload');
         btnDownload.href = streamUrl;
@@ -385,12 +393,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         playerSection.classList.remove('hidden');
         lucide.createIcons();
 
-        // Auto play
         videoPlayer.play().catch(() => {
           console.log("Autoplay dicegah oleh browser, silakan klik tombol play manual.");
         });
 
-        // Save history
         saveToHistory({
           id: data.video_id,
           raw_mp4: data.raw_mp4,
@@ -459,7 +465,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       renderHistory();
     }
 
-    // On Load
     renderHistory();
   </script>
 </body>
@@ -501,7 +506,7 @@ class CleanStreamHandler(http.server.BaseHTTPRequestHandler):
 
             try:
                 req = urllib.request.Request(raw_url, headers=req_headers, method="HEAD")
-                with urllib.request.urlopen(req, timeout=10) as resp:
+                with fetch_with_retry(req) as resp:
                     self.send_response(resp.status)
                     for h in ["Content-Type", "Content-Range", "Content-Length", "Accept-Ranges", "Last-Modified", "ETag"]:
                         val = resp.headers.get(h)
@@ -522,7 +527,7 @@ class CleanStreamHandler(http.server.BaseHTTPRequestHandler):
         path = parsed.path
         query = urllib.parse.parse_qs(parsed.query)
 
-        # 1. Root: Web Application UI
+        # 1. Web UI
         if path == "/" or path == "/index.html":
             local_ip = get_local_ip()
             content = HTML_TEMPLATE.replace("__LOCAL_IP__", local_ip).replace("__PORT__", str(self.server.server_address[1]))
@@ -547,7 +552,7 @@ class CleanStreamHandler(http.server.BaseHTTPRequestHandler):
                 self.send_json({"status": "error", "message": str(e)}, status=500)
             return
 
-        # 3. Stream: Range-capable Reverse Proxy with Referer Injection
+        # 3. Stream: Reverse Proxy
         if path == "/stream":
             raw_url = query.get("url", [""])[0]
             video_id = query.get("id", [""])[0]
@@ -567,11 +572,9 @@ class CleanStreamHandler(http.server.BaseHTTPRequestHandler):
             self.proxy_stream(raw_url)
             return
 
-        # 4. 404 Fallback
         self.send_error(404, "Halaman tidak ditemukan")
 
     def proxy_stream(self, remote_url):
-        """Streams remote MP4 with HTTP Range headers and injected Referer"""
         range_header = self.headers.get("Range")
         req_headers = {
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -584,16 +587,13 @@ class CleanStreamHandler(http.server.BaseHTTPRequestHandler):
         
         try:
             with urllib.request.urlopen(req, timeout=15) as remote_resp:
-                status_code = remote_resp.status
-                self.send_response(status_code)
+                self.send_response(remote_resp.status)
 
-                # Forward necessary video streaming headers
                 for h in ["Content-Type", "Content-Range", "Content-Length", "Accept-Ranges", "Last-Modified", "ETag"]:
                     val = remote_resp.headers.get(h)
                     if val:
                         self.send_header(h, val)
 
-                # Ensure CORS and range accept
                 self.send_header("Access-Control-Allow-Origin", "*")
                 self.send_header("Access-Control-Allow-Headers", "*")
                 if not remote_resp.headers.get("Accept-Ranges"):
@@ -603,7 +603,6 @@ class CleanStreamHandler(http.server.BaseHTTPRequestHandler):
 
                 self.end_headers()
 
-                # Stream buffer in 64KB chunks
                 chunk_size = 64 * 1024
                 while True:
                     chunk = remote_resp.read(chunk_size)
@@ -640,7 +639,6 @@ def run_server():
     port = args.port
     httpd = None
     
-    # Try specified port or find available port
     for p in range(port, port + 20):
         try:
             server_address = ("0.0.0.0", p)

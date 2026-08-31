@@ -1,8 +1,19 @@
 from http.server import BaseHTTPRequestHandler
 import urllib.request
 import urllib.parse
+import time
 import json
 import re
+
+def fetch_with_retry(req, retries=3, delay=1.0):
+    import time
+    for attempt in range(retries):
+        try:
+            return urllib.request.urlopen(req, timeout=12)
+        except (urllib.error.HTTPError, urllib.error.URLError) as e:
+            if attempt == retries - 1:
+                raise
+            time.sleep(delay)
 
 def extract_video_info(input_url_or_id):
     input_str = input_url_or_id.strip()
@@ -24,7 +35,7 @@ def extract_video_info(input_url_or_id):
     
     # 1. Fetch embed page
     req = urllib.request.Request(embed_url, headers=headers)
-    with urllib.request.urlopen(req, timeout=10) as resp:
+    with fetch_with_retry(req) as resp:
         embed_html = resp.read().decode("utf-8")
         
     iframe_id_match = re.search(r"var iframeId = [\'\"]([a-f0-9]+)[\'\"]", embed_html)
@@ -40,7 +51,7 @@ def extract_video_info(input_url_or_id):
     iframe_url = f"https://streamrizz.com/ip129jk?id={iframe_id}&t={embed_token}"
     headers["Referer"] = embed_url
     req2 = urllib.request.Request(iframe_url, headers=headers)
-    with urllib.request.urlopen(req2, timeout=10) as resp2:
+    with fetch_with_retry(req2) as resp2:
         iframe_html = resp2.read().decode("utf-8")
         
     player_path_match = re.search(r"playerPath\s*=\s*[\'\"]([^\'\"]+)[\'\"]", iframe_html)
@@ -52,21 +63,31 @@ def extract_video_info(input_url_or_id):
     # 3. Fetch stream player page
     headers["Referer"] = iframe_url
     req3 = urllib.request.Request(player_path, headers=headers)
-    with urllib.request.urlopen(req3, timeout=10) as resp3:
+    with fetch_with_retry(req3) as resp3:
         stream_html = resp3.read().decode("utf-8")
         
-    source_match = re.search(r"<source\s+src=[\'\"](https?://[^\'\"\s>]+\.mp4)[\'\"]", stream_html)
-    poster_match = re.search(r"poster=[\'\"](https?://[^\'\"\s>]+)[\'\"]", stream_html)
+    # Extract source (supports spaces, mp4/mkv/m3u8, etc.)
+    source_match = re.search(r"<source\s+[^>]*src=[\'\"]([^\'\"]+)[\'\"]", stream_html)
+    if not source_match:
+        source_match = re.search(r"<video\s+[^>]*src=[\'\"]([^\'\"]+)[\'\"]", stream_html)
+
+    poster_match = re.search(r"poster=[\'\"]([^\'\"]+)[\'\"]", stream_html)
+    title_match = re.search(r"<title>(.*?)</title>", stream_html)
     
     if not source_match:
-        raise ValueError("Gagal menemukan sumber video MP4 langsung")
+        raise ValueError("Gagal menemukan sumber video langsung pada halaman player")
         
-    raw_mp4 = source_match.group(1)
+    raw_mp4 = source_match.group(1).strip()
+    # Normalize URL encoding for spaces
+    encoded_mp4 = urllib.parse.quote(raw_mp4, safe=":/%?=&@#+~")
     poster = poster_match.group(1) if poster_match else f"https://i.streamrizz.com/image/{video_id}.jpg"
-    
+    title = title_match.group(1).strip() if title_match else video_id
+
     return {
         "video_id": video_id,
-        "raw_mp4": raw_mp4,
+        "title": title,
+        "raw_mp4": encoded_mp4,
+        "original_name": raw_mp4.split("/")[-1],
         "poster": poster,
         "embed_url": embed_url
     }
