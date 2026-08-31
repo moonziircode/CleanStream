@@ -18,6 +18,30 @@ def fetch_with_retry(req, retries=3, delay=1.0):
                 raise
             time.sleep(delay)
 
+def rewrite_m3u8(content, base_url, proxy_prefix="/api/stream?url="):
+    lines = content.splitlines()
+    new_lines = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            new_lines.append(line)
+        elif stripped.startswith("#"):
+            if 'URI="' in stripped:
+                def replace_uri(match):
+                    uri = match.group(1)
+                    abs_uri = urllib.parse.urljoin(base_url, uri)
+                    encoded = urllib.parse.quote(abs_uri, safe=":/%?=&@#+~")
+                    return 'URI="' + proxy_prefix + encoded + '"'
+                new_tag = re.sub(r'URI="([^"]+)"', replace_uri, stripped)
+                new_lines.append(new_tag)
+            else:
+                new_lines.append(line)
+        else:
+            abs_url = urllib.parse.urljoin(base_url, stripped)
+            encoded = urllib.parse.quote(abs_url, safe=":/%?=&@#+~")
+            new_lines.append(proxy_prefix + encoded)
+    return "\n".join(new_lines)
+
 def extract_video_info(input_url_or_id):
     input_str = input_url_or_id.strip()
     if "http" in input_str:
@@ -79,16 +103,19 @@ def extract_video_info(input_url_or_id):
     if not source_match:
         raise ValueError("Gagal menemukan sumber video langsung pada halaman player")
         
-    raw_mp4 = source_match.group(1).strip()
-    encoded_mp4 = urllib.parse.quote(raw_mp4, safe=":/%?=&@#+~")
+    raw_source = source_match.group(1).strip()
+    encoded_source = urllib.parse.quote(raw_source, safe=":/%?=&@#+~")
     poster = poster_match.group(1) if poster_match else f"https://i.streamrizz.com/image/{video_id}.jpg"
     title = title_match.group(1).strip() if title_match else video_id
+
+    is_hls = ".m3u8" in raw_source.lower()
 
     return {
         "video_id": video_id,
         "title": title,
-        "raw_mp4": encoded_mp4,
-        "original_name": raw_mp4.split("/")[-1],
+        "raw_mp4": encoded_source,
+        "is_hls": is_hls,
+        "original_name": raw_source.split("/")[-1],
         "poster": poster,
         "embed_url": embed_url
     }
@@ -120,6 +147,17 @@ def handle_stream():
     try:
         remote_resp = urllib.request.urlopen(req, timeout=15)
         status_code = remote_resp.status
+        content_type = remote_resp.headers.get("Content-Type", "")
+
+        # Check if this is an M3U8 playlist
+        is_m3u8 = ".m3u8" in raw_url.lower() or "mpegurl" in content_type.lower()
+        if is_m3u8 and request.method != "HEAD":
+            m3u8_content = remote_resp.read().decode("utf-8", errors="ignore")
+            rewritten_m3u8 = rewrite_m3u8(m3u8_content, raw_url, proxy_prefix="/api/stream?url=")
+            resp = Response(rewritten_m3u8, status=200, mimetype="application/vnd.apple.mpegurl")
+            resp.headers["Access-Control-Allow-Origin"] = "*"
+            resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+            return resp
 
         if request.method == "HEAD":
             resp = Response(status=status_code)
@@ -141,7 +179,14 @@ def handle_stream():
             finally:
                 remote_resp.close()
 
-        resp = Response(generate(), status=status_code, mimetype="video/mp4")
+        # Determine mimetype
+        mimetype = "video/mp4"
+        if ".ts" in raw_url.lower():
+            mimetype = "video/mp2t"
+        elif is_m3u8:
+            mimetype = "application/vnd.apple.mpegurl"
+
+        resp = Response(generate(), status=status_code, mimetype=mimetype)
         for h in ["Content-Type", "Content-Range", "Content-Length", "Accept-Ranges", "Last-Modified", "ETag"]:
             val = remote_resp.headers.get(h)
             if val:
@@ -170,8 +215,7 @@ def route_catch_all(path):
     p = (request.path or "").lower()
     u = (request.args.get("url") or "").lower()
     
-    # Check if stream or resolve based on URL content and path
-    if "stream" in p or ".mp4" in u or "overfetch" in u:
+    if "stream" in p or ".mp4" in u or ".m3u8" in u or ".ts" in u or "overfetch" in u:
         return handle_stream()
     elif "resolve" in p or "streamrizz" in u or "vidoy" in u or "url" in request.args:
         return handle_resolve()
