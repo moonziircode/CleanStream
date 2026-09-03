@@ -1,2 +1,1 @@
-flask
-flask-cors
+# CleanStream - Zero External Python Dependencies (Standard Library Only)

@@ -345,7 +345,14 @@
             }
             hlsInstance = new Hls({
               enableWorker: true,
-              lowLatencyMode: true
+              startLevel: -1,
+              capLevelToPlayerSize: true,
+              maxBufferLength: 30,
+              maxMaxBufferLength: 60,
+              backBufferLength: 20,
+              startFragPrefetch: true,
+              testBandwidth: true,
+              progressive: true
             });
             hlsInstance.loadSource(streamUrl);
             hlsInstance.attachMedia(videoPlayer);
