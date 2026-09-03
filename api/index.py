@@ -85,7 +85,7 @@ RESOLVE_CACHE = FastLRUCache(maxsize=512, ttl=1800)
 URI_REGEX = re.compile(r'URI="([^"]+)"')
 SAFE_URL_CHARS = ":/%?=&@#+~"
 
-def rewrite_m3u8(content: str, base_url: str, proxy_prefix: str = "/api/stream?url=") -> str:
+def rewrite_m3u8(content: str, base_url: str, proxy_prefix: str = "/api/stream?action=stream&url=") -> str:
     """
     Single-pass, zero-regex-per-segment HLS manifest rewriter.
     Converts relative/absolute sub-playlists and TS segments into proxy URLs.
@@ -243,7 +243,6 @@ def app(environ, start_response):
     Zero dependencies, sub-millisecond dispatch, streaming response support.
     """
     method = environ.get("REQUEST_METHOD", "GET").upper()
-    path = environ.get("PATH_INFO", "")
     query = environ.get("QUERY_STRING", "")
     params = urllib.parse.parse_qs(query)
 
@@ -257,43 +256,29 @@ def app(environ, start_response):
         ])
         return [b""]
 
-    # --------------------------------------------------------------------------
-    # Route: /api/resolve
-    # --------------------------------------------------------------------------
-    if "/resolve" in path or ("url" in params and "stream" not in path):
-        raw_url = params.get("url", [""])[0].strip()
-        if not raw_url:
-            start_response("400 Bad Request", [
-                ("Content-Type", "application/json"),
-                ("Access-Control-Allow-Origin", "*")
-            ])
-            return [json.dumps({"status": "error", "message": "Parameter url diperlukan"}).encode("utf-8")]
+    # Accurate Route Determination
+    raw_uri = (
+        environ.get("RAW_URI", "")
+        or environ.get("REQUEST_URI", "")
+        or environ.get("HTTP_X_MATCHED_PATH", "")
+        or environ.get("PATH_INFO", "")
+    )
+    req_path = urllib.parse.urlparse(raw_uri).path.lower()
+    action = params.get("action", [""])[0].lower()
+    target_url = params.get("url", [""])[0].strip()
+    target_url_lower = target_url.lower()
 
-        try:
-            info = extract_video_info(raw_url)
-            body = json.dumps({"status": "ok", **info}).encode("utf-8")
-            start_response("200 OK", [
-                ("Content-Type", "application/json"),
-                ("Access-Control-Allow-Origin", "*"),
-                ("Cache-Control", "public, max-age=300")
-            ])
-            return [body]
-        except Exception as e:
-            start_response("500 Internal Server Error", [
-                ("Content-Type", "application/json"),
-                ("Access-Control-Allow-Origin", "*")
-            ])
-            return [json.dumps({"status": "error", "message": str(e)}).encode("utf-8")]
+    is_stream_route = (
+        action == "stream"
+        or "/stream" in req_path
+        or req_path.endswith("stream")
+        or any(ext in target_url_lower for ext in (".mp4", ".m3u8", ".ts", ".key", "overfetch"))
+    )
 
     # --------------------------------------------------------------------------
-    # Route: /api/stream
+    # Route: /api/stream (Media Proxy & Playlist Rewriter)
     # --------------------------------------------------------------------------
-    if "/stream" in path or any(ext in query.lower() for ext in (".m3u8", ".ts", ".mp4")):
-        target_url = params.get("url", [""])[0].strip()
-        if not target_url:
-            start_response("400 Bad Request", [("Content-Type", "text/plain")])
-            return [b"Parameter url diperlukan"]
-
+    if is_stream_route and target_url:
         if not is_safe_url(target_url):
             start_response("403 Forbidden", [("Content-Type", "text/plain")])
             return [b"Forbidden URL: Akses target tidak diizinkan"]
@@ -313,12 +298,12 @@ def app(environ, start_response):
             status_code = remote_resp.status
             content_type = remote_resp.headers.get("Content-Type", "")
 
-            is_m3u8 = ".m3u8" in target_url.lower() or "mpegurl" in content_type.lower()
+            is_m3u8 = ".m3u8" in target_url_lower or "mpegurl" in content_type.lower()
 
             # Case A: M3U8 Playlist (Single-pass rewrite & 60s cache)
             if is_m3u8 and method != "HEAD":
                 m3u8_content = remote_resp.read().decode("utf-8", errors="ignore")
-                rewritten = rewrite_m3u8(m3u8_content, target_url, proxy_prefix="/api/stream?url=")
+                rewritten = rewrite_m3u8(m3u8_content, target_url, proxy_prefix="/api/stream?action=stream&url=")
                 body = rewritten.encode("utf-8")
                 start_response("200 OK", [
                     ("Content-Type", "application/vnd.apple.mpegurl"),
@@ -344,7 +329,7 @@ def app(environ, start_response):
 
             # Case C: Binary Media / TS Segment / MP4 (Direct 128KB Chunked Stream)
             mimetype = "video/mp4"
-            if ".ts" in target_url.lower():
+            if ".ts" in target_url_lower:
                 mimetype = "video/mp2t"
             elif is_m3u8:
                 mimetype = "application/vnd.apple.mpegurl"
@@ -355,7 +340,7 @@ def app(environ, start_response):
                 ("Content-Type", mimetype),
                 ("Access-Control-Allow-Origin", "*"),
                 ("Accept-Ranges", "bytes"),
-                ("Cache-Control", "public, max-age=86400, immutable" if ".ts" in target_url.lower() else "public, max-age=3600")
+                ("Cache-Control", "public, max-age=86400, immutable" if ".ts" in target_url_lower else "public, max-age=3600")
             ]
             for h in FORWARD_HEADERS:
                 if h != "Content-Type":
@@ -385,6 +370,26 @@ def app(environ, start_response):
         except Exception as e:
             start_response("502 Bad Gateway", [("Content-Type", "text/plain")])
             return [f"Streaming error: {e}".encode("utf-8")]
+
+    # --------------------------------------------------------------------------
+    # Route: /api/resolve (Video Resolver)
+    # --------------------------------------------------------------------------
+    if target_url:
+        try:
+            info = extract_video_info(target_url)
+            body = json.dumps({"status": "ok", **info}).encode("utf-8")
+            start_response("200 OK", [
+                ("Content-Type", "application/json"),
+                ("Access-Control-Allow-Origin", "*"),
+                ("Cache-Control", "public, max-age=300")
+            ])
+            return [body]
+        except Exception as e:
+            start_response("500 Internal Server Error", [
+                ("Content-Type", "application/json"),
+                ("Access-Control-Allow-Origin", "*")
+            ])
+            return [json.dumps({"status": "error", "message": str(e)}).encode("utf-8")]
 
     # --------------------------------------------------------------------------
     # Default Service Info Route
