@@ -176,11 +176,20 @@
           controls 
           playsinline 
           webkit-playsinline 
-          preload="metadata"
-          class="w-full aspect-video"
+          preload="auto"
+          class="w-full aspect-video rounded-2xl bg-black"
         >
           Browser Anda tidak mendukung pemutar HTML5.
         </video>
+
+        <!-- Dynamic Buffer Tracker / Health Indicator -->
+        <div id="bufferBarContainer" class="hidden px-2 pt-2 pb-1 flex items-center justify-between text-[10px] font-mono text-zinc-400">
+          <div class="flex items-center gap-1.5">
+            <span class="inline-block w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+            <span id="bufferStatus">Buffer: 0s dimuat</span>
+          </div>
+          <span id="bufferPercent" class="text-zinc-500">0%</span>
+        </div>
       </div>
 
       <!-- Video Action Tiles -->
@@ -339,7 +348,7 @@
             }
             videoPlayer.src = streamUrl;
           } else if (typeof Hls !== 'undefined' && Hls.isSupported()) {
-            // Hls.js for Chrome / Firefox / Edge / PC
+            // Hls.js for Chrome / Firefox / Edge / PC with aggressive YouTube-style buffer
             if (hlsInstance) {
               hlsInstance.destroy();
             }
@@ -347,12 +356,14 @@
               enableWorker: true,
               startLevel: -1,
               capLevelToPlayerSize: true,
-              maxBufferLength: 30,
-              maxMaxBufferLength: 60,
-              backBufferLength: 20,
+              maxBufferLength: 120,          // Load up to 120s ahead (like YouTube)
+              maxMaxBufferLength: 300,       // Max buffer up to 5 minutes
+              maxBufferSize: 120 * 1024 * 1024, // 120 MB max buffer cache
+              backBufferLength: 60,          // Keep 60s past buffer for smooth rewind
               startFragPrefetch: true,
               testBandwidth: true,
-              progressive: true
+              progressive: true,
+              lowLatencyMode: false          // High-throughput VOD mode over low latency
             });
             hlsInstance.loadSource(streamUrl);
             hlsInstance.attachMedia(videoPlayer);
@@ -486,6 +497,44 @@
       renderHistory();
       showToast("Riwayat dibersihkan");
     }
+
+    // YouTube-style Buffer Health Monitor & Ahead Tracker
+    const bufferBarContainer = document.getElementById('bufferBarContainer');
+    const bufferStatus = document.getElementById('bufferStatus');
+    const bufferPercent = document.getElementById('bufferPercent');
+
+    function updateBufferIndicator() {
+      if (!videoPlayer || !videoPlayer.duration || isNaN(videoPlayer.duration)) return;
+      const duration = videoPlayer.duration;
+      const currentTime = videoPlayer.currentTime;
+      let bufferedEnd = 0;
+
+      for (let i = 0; i < videoPlayer.buffered.length; i++) {
+        if (videoPlayer.buffered.start(i) <= currentTime && currentTime <= videoPlayer.buffered.end(i)) {
+          bufferedEnd = videoPlayer.buffered.end(i);
+          break;
+        }
+      }
+
+      if (bufferedEnd === 0 && videoPlayer.buffered.length > 0) {
+        bufferedEnd = videoPlayer.buffered.end(videoPlayer.buffered.length - 1);
+      }
+
+      const ahead = Math.max(0, bufferedEnd - currentTime);
+      const pct = Math.min(100, Math.round((bufferedEnd / duration) * 100));
+
+      if (bufferBarContainer && !bufferBarContainer.classList.contains('hidden')) {
+        bufferStatus.textContent = `Buffer: ${ahead.toFixed(1)}s ahead (${bufferedEnd.toFixed(0)}s/${duration.toFixed(0)}s)`;
+        bufferPercent.textContent = `${pct}% dimuat`;
+      }
+    }
+
+    videoPlayer.addEventListener('progress', updateBufferIndicator);
+    videoPlayer.addEventListener('timeupdate', updateBufferIndicator);
+    videoPlayer.addEventListener('loadedmetadata', () => {
+      if (bufferBarContainer) bufferBarContainer.classList.remove('hidden');
+      updateBufferIndicator();
+    });
 
     toggleClearBtn();
     renderHistory();

@@ -85,6 +85,17 @@ RESOLVE_CACHE = FastLRUCache(maxsize=512, ttl=1800)
 URI_REGEX = re.compile(r'URI="([^"]+)"')
 SAFE_URL_CHARS = ":/%?=&@#+~"
 
+def sanitize_url(raw_url: str) -> str:
+    """Ensure paths with spaces and special characters are safely percent-encoded for HTTP requests."""
+    if not raw_url:
+        return ""
+    try:
+        p = urllib.parse.urlsplit(raw_url)
+        clean_path = urllib.parse.quote(urllib.parse.unquote(p.path), safe="/@%")
+        return urllib.parse.urlunsplit((p.scheme, p.netloc, clean_path, p.query, p.fragment))
+    except Exception:
+        return raw_url
+
 def rewrite_m3u8(content: str, base_url: str, proxy_prefix: str = "/api/stream?action=stream&url=") -> str:
     """
     Single-pass, zero-regex-per-segment HLS manifest rewriter.
@@ -94,8 +105,8 @@ def rewrite_m3u8(content: str, base_url: str, proxy_prefix: str = "/api/stream?a
     quote = urllib.parse.quote
 
     def replace_uri(m):
-        abs_u = join(base_url, m.group(1))
-        return f'URI="{proxy_prefix}{quote(abs_u, safe=SAFE_URL_CHARS)}"'
+        abs_u = sanitize_url(join(base_url, m.group(1)))
+        return f'URI="{proxy_prefix}{quote(abs_u, safe="")}"'
 
     out = []
     app = out.append
@@ -109,8 +120,8 @@ def rewrite_m3u8(content: str, base_url: str, proxy_prefix: str = "/api/stream?a
             else:
                 app(line)
         else:
-            abs_u = join(base_url, line_s)
-            app(f"{proxy_prefix}{quote(abs_u, safe=SAFE_URL_CHARS)}")
+            abs_u = sanitize_url(join(base_url, line_s))
+            app(proxy_prefix + quote(abs_u, safe=""))
 
     return "\n".join(out)
 
@@ -235,7 +246,7 @@ FORWARD_HEADERS = (
     "ETag"
 )
 
-CHUNK_SIZE = 128 * 1024  # 128 KB chunks for optimal throughput
+CHUNK_SIZE = 256 * 1024  # 256 KB chunks for high-throughput streaming and minimal syscall context switches
 
 def app(environ, start_response):
     """
@@ -292,8 +303,10 @@ def app(environ, start_response):
         if range_header:
             req_headers["Range"] = range_header
 
+        clean_target = sanitize_url(target_url)
+
         try:
-            req = urllib.request.Request(target_url, headers=req_headers)
+            req = urllib.request.Request(clean_target, headers=req_headers)
             remote_resp = urllib.request.urlopen(req, timeout=15)
             status_code = remote_resp.status
             content_type = remote_resp.headers.get("Content-Type", "")
