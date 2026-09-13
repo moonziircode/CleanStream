@@ -141,24 +141,72 @@ TITLE_REGEX = re.compile(r"<title>(.*?)</title>")
 
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
+def resolve_vidara(filecode: str) -> dict:
+    """
+    Direct resolver for Vidara (vidara.to / vidwara.art).
+    Resolves HLS master playlist via internal stream API in a single HTTP request.
+    """
+    api_url = "https://vidwara.art/api/stream"
+    payload = json.dumps({"filecode": filecode, "device": "web"}).encode("utf-8")
+    req = urllib.request.Request(
+        api_url,
+        data=payload,
+        headers={
+            "User-Agent": USER_AGENT,
+            "Referer": f"https://vidwara.art/e/{filecode}",
+            "Origin": "https://vidwara.art",
+            "Content-Type": "application/json"
+        }
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        res = json.loads(resp.read().decode("utf-8", errors="ignore"))
+
+    raw_source = res.get("streaming_url") or res.get("url")
+    if not raw_source:
+        raise ValueError(f"Vidara stream URL tidak ditemukan untuk ID: {filecode}")
+
+    title = res.get("title") or f"Vidara {filecode}"
+    poster = res.get("thumbnail") or ""
+    is_hls = ".m3u8" in raw_source.lower()
+
+    return {
+        "video_id": filecode,
+        "title": title,
+        "raw_mp4": raw_source,
+        "is_hls": is_hls,
+        "original_name": raw_source.split("/")[-1].split("?")[0],
+        "poster": poster,
+        "embed_url": f"https://vidara.to/v/{filecode}"
+    }
+
 def extract_video_info(input_url_or_id: str) -> dict:
     """
-    Extracts direct media stream URL from third-party embed.
+    Extracts direct media stream URL from supported providers (Streamrizz, Vidara).
     Uses TLS keep-alive for multi-step handshake to eliminate handshake latency.
     """
     input_str = input_url_or_id.strip()
+    is_vidara = "vidara.to" in input_str or "vidwara.art" in input_str
+
     if "http" in input_str:
         m = ID_REGEX.search(input_str)
         video_id = m.group(1) if m else input_str.rstrip("/").split("/")[-1].split("?")[0]
     else:
         video_id = input_str
 
+    cache_key = f"{'vidara' if is_vidara else 'streamrizz'}:{video_id}"
+
     # 1. Check memory cache (0.01ms response)
-    cached = RESOLVE_CACHE.get(video_id)
+    cached = RESOLVE_CACHE.get(cache_key)
     if cached:
         return cached
 
-    # 2. Perform 3-step handshake with connection reuse
+    # 2. Vidara Provider
+    if is_vidara:
+        result = resolve_vidara(video_id)
+        RESOLVE_CACHE.set(cache_key, result)
+        return result
+
+    # 3. Streamrizz Provider (Perform 3-step handshake with connection reuse)
     ctx = ssl.create_default_context()
     conn = http.client.HTTPSConnection("streamrizz.com", timeout=10, context=ctx)
 
@@ -229,7 +277,7 @@ def extract_video_info(input_url_or_id: str) -> dict:
         "embed_url": f"https://streamrizz.com/e/{video_id}"
     }
 
-    RESOLVE_CACHE.set(video_id, result)
+    RESOLVE_CACHE.set(cache_key, result)
     return result
 
 
@@ -294,11 +342,21 @@ def app(environ, start_response):
             start_response("403 Forbidden", [("Content-Type", "text/plain")])
             return [b"Forbidden URL: Akses target tidak diizinkan"]
 
-        # Forward Range header
+        # Forward Range header & set origin-appropriate Referer
         range_header = environ.get("HTTP_RANGE")
+        parsed_target = urllib.parse.urlparse(target_url)
+        target_netloc = parsed_target.netloc.lower()
+
+        if "streamrizz" in target_netloc:
+            proxy_referer = "https://streamrizz.com/"
+        elif "vidwara" in target_netloc or "97bf1.com" in target_netloc:
+            proxy_referer = "https://vidwara.art/"
+        else:
+            proxy_referer = f"{parsed_target.scheme}://{parsed_target.netloc}/"
+
         req_headers = {
             "User-Agent": USER_AGENT,
-            "Referer": "https://streamrizz.com/"
+            "Referer": proxy_referer
         }
         if range_header:
             req_headers["Range"] = range_header
