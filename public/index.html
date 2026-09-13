@@ -343,8 +343,13 @@
           // ALWAYS PREFER Hls.js when supported (Chrome, Edge, Firefox, Desktop Safari MSE)
           if (typeof Hls !== 'undefined' && Hls.isSupported()) {
             if (hlsInstance) {
+              try { hlsInstance.detachMedia(); } catch (e) {}
               hlsInstance.destroy();
+              hlsInstance = null;
             }
+            videoPlayer.removeAttribute('src');
+            videoPlayer.load();
+
             hlsInstance = new Hls({
               enableWorker: true,
               startLevel: -1,
@@ -375,6 +380,7 @@
                     break;
                   default:
                     console.error("HLS unrecoverable error, beralih ke native src:", data);
+                    try { hlsInstance.detachMedia(); } catch (e) {}
                     hlsInstance.destroy();
                     hlsInstance = null;
                     videoPlayer.src = streamUrl;
@@ -387,20 +393,25 @@
           } else if (videoPlayer.canPlayType('application/vnd.apple.mpegurl')) {
             // Native HLS fallback (strictly for mobile iOS Safari where MSE is unavailable)
             if (hlsInstance) {
+              try { hlsInstance.detachMedia(); } catch (e) {}
               hlsInstance.destroy();
               hlsInstance = null;
             }
             videoPlayer.src = streamUrl;
+            videoPlayer.load();
           } else {
             videoPlayer.src = streamUrl;
+            videoPlayer.load();
           }
         } else {
           // Standard MP4
           if (hlsInstance) {
+            try { hlsInstance.detachMedia(); } catch (e) {}
             hlsInstance.destroy();
             hlsInstance = null;
           }
           videoPlayer.src = streamUrl;
+          videoPlayer.load();
         }
         
         const btnDownload = document.getElementById('btnDownload');
