@@ -5,6 +5,7 @@ Optimized for: Ultra-fast TTFB, connection reuse, single-pass M3U8 rewriting,
 byte-range seeking, SSRF security, and serverless edge caching.
 """
 
+import html
 import http.client
 import ipaddress
 import json
@@ -100,12 +101,20 @@ def rewrite_m3u8(content: str, base_url: str, proxy_prefix: str = "/api/stream?a
     """
     Single-pass, zero-regex-per-segment HLS manifest rewriter.
     Converts relative/absolute sub-playlists and TS segments into proxy URLs.
+    Preserves authentication tokens and signatures from base_url for relative segment URLs.
     """
     join = urllib.parse.urljoin
     quote = urllib.parse.quote
+    base_query = urllib.parse.urlsplit(base_url).query
+
+    def resolve_url(u: str) -> str:
+        abs_u = join(base_url, u)
+        if base_query and "?" not in u and "?" not in abs_u:
+            abs_u = f"{abs_u}?{base_query}"
+        return sanitize_url(abs_u)
 
     def replace_uri(m):
-        abs_u = sanitize_url(join(base_url, m.group(1)))
+        abs_u = resolve_url(m.group(1))
         return f'URI="{proxy_prefix}{quote(abs_u, safe="")}"'
 
     out = []
@@ -120,7 +129,7 @@ def rewrite_m3u8(content: str, base_url: str, proxy_prefix: str = "/api/stream?a
             else:
                 app(line)
         else:
-            abs_u = sanitize_url(join(base_url, line_s))
+            abs_u = resolve_url(line_s)
             app(proxy_prefix + quote(abs_u, safe=""))
 
     return "\n".join(out)
@@ -134,6 +143,7 @@ ID_REGEX = re.compile(r"(?:/e/|/v/|/embed/|/d/|/)([a-zA-Z0-9_-]{6,32})(?:[/?#]|$
 IFRAME_ID_REGEX = re.compile(r"var iframeId = ['\"]([a-f0-9]+)['\"]")
 EMBED_TOKEN_REGEX = re.compile(r"var embedToken = ['\"]([^'\"]+)['\"]")
 PLAYER_PATH_REGEX = re.compile(r"playerPath\s*=\s*['\"]([^'\"]+)['\"]")
+STREAM_PHP_REGEX = re.compile(r"https://streamrizz\.com/stream\.php\?[^\"'\s<>]+")
 SOURCE_REGEX = re.compile(r"<source\s+[^>]*src=['\"]([^'\"]+)['\"]")
 VIDEO_SRC_REGEX = re.compile(r"<video\s+[^>]*src=['\"]([^'\"]+)['\"]")
 POSTER_REGEX = re.compile(r"poster=['\"]([^'\"]+)['\"]")
@@ -237,11 +247,28 @@ def extract_video_info(input_url_or_id: str) -> dict:
         resp2 = conn.getresponse()
         iframe_html = resp2.read().decode("utf-8", errors="ignore")
 
-        m_path = PLAYER_PATH_REGEX.search(iframe_html)
+        m_path = PLAYER_PATH_REGEX.search(iframe_html) or STREAM_PHP_REGEX.search(iframe_html)
         if not m_path:
-            raise ValueError("Gagal menemukan playerPath di halaman iframe")
+            # Fallback: retry with fresh urllib request if keep-alive connection dropped or was empty
+            try:
+                fb_req = urllib.request.Request(
+                    f"https://streamrizz.com/ip129jk?id={iframe_id}&t={embed_token}",
+                    headers={
+                        "User-Agent": USER_AGENT,
+                        "Referer": f"https://streamrizz.com/e/{video_id}"
+                    }
+                )
+                with urllib.request.urlopen(fb_req, timeout=10) as fb_resp:
+                    iframe_html = fb_resp.read().decode("utf-8", errors="ignore")
+                m_path = PLAYER_PATH_REGEX.search(iframe_html) or STREAM_PHP_REGEX.search(iframe_html)
+            except Exception:
+                pass
 
-        player_path = m_path.group(1).replace(r"\u0026", "&").replace("&amp;", "&")
+        if not m_path:
+            raise ValueError(f"Gagal menemukan playerPath di halaman iframe (ID: {video_id})")
+
+        raw_path = m_path.group(1 if m_path.lastindex else 0)
+        player_path = raw_path.replace(r"\u0026", "&").replace("&amp;", "&")
 
     finally:
         conn.close()
@@ -264,7 +291,7 @@ def extract_video_info(input_url_or_id: str) -> dict:
     title_match = TITLE_REGEX.search(stream_html)
 
     poster = poster_match.group(1) if poster_match else f"https://i.streamrizz.com/image/{video_id}.jpg"
-    title = title_match.group(1).strip() if title_match else f"Video {video_id}"
+    title = html.unescape(title_match.group(1).strip()) if title_match else f"Video {video_id}"
     is_hls = ".m3u8" in raw_source.lower()
 
     result = {
@@ -310,7 +337,8 @@ def app(environ, start_response):
         start_response("204 No Content", [
             ("Access-Control-Allow-Origin", "*"),
             ("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS"),
-            ("Access-Control-Allow-Headers", "Range, Content-Type, Authorization"),
+            ("Access-Control-Allow-Headers", "Range, Content-Type, Authorization, Accept-Encoding, User-Agent, Referer"),
+            ("Access-Control-Expose-Headers", "Content-Length, Content-Range, Accept-Ranges"),
             ("Access-Control-Max-Age", "86400")
         ])
         return [b""]
@@ -380,6 +408,7 @@ def app(environ, start_response):
                     ("Content-Type", "application/vnd.apple.mpegurl"),
                     ("Content-Length", str(len(body))),
                     ("Access-Control-Allow-Origin", "*"),
+                    ("Access-Control-Expose-Headers", "Content-Length, Content-Range, Accept-Ranges"),
                     ("Cache-Control", "public, max-age=60")
                 ])
                 return [body]
@@ -388,6 +417,7 @@ def app(environ, start_response):
             if method == "HEAD":
                 headers = [
                     ("Access-Control-Allow-Origin", "*"),
+                    ("Access-Control-Expose-Headers", "Content-Length, Content-Range, Accept-Ranges"),
                     ("Accept-Ranges", "bytes")
                 ]
                 for h in FORWARD_HEADERS:
@@ -410,6 +440,7 @@ def app(environ, start_response):
             resp_headers = [
                 ("Content-Type", mimetype),
                 ("Access-Control-Allow-Origin", "*"),
+                ("Access-Control-Expose-Headers", "Content-Length, Content-Range, Accept-Ranges"),
                 ("Accept-Ranges", "bytes"),
                 ("Cache-Control", "public, max-age=86400, immutable" if ".ts" in target_url_lower else "public, max-age=3600")
             ]

@@ -340,15 +340,8 @@
         const isHls = data.is_hls || data.raw_mp4.includes('.m3u8');
 
         if (isHls) {
-          if (videoPlayer.canPlayType('application/vnd.apple.mpegurl')) {
-            // Native HLS for iOS Safari & macOS Safari
-            if (hlsInstance) {
-              hlsInstance.destroy();
-              hlsInstance = null;
-            }
-            videoPlayer.src = streamUrl;
-          } else if (typeof Hls !== 'undefined' && Hls.isSupported()) {
-            // Hls.js for Chrome / Firefox / Edge / PC with aggressive YouTube-style buffer
+          // ALWAYS PREFER Hls.js when supported (Chrome, Edge, Firefox, Desktop Safari MSE)
+          if (typeof Hls !== 'undefined' && Hls.isSupported()) {
             if (hlsInstance) {
               hlsInstance.destroy();
             }
@@ -367,6 +360,37 @@
             });
             hlsInstance.loadSource(streamUrl);
             hlsInstance.attachMedia(videoPlayer);
+
+            // Resilient error recovery for HLS stream
+            hlsInstance.on(Hls.Events.ERROR, function(event, data) {
+              if (data.fatal) {
+                switch (data.type) {
+                  case Hls.ErrorTypes.NETWORK_ERROR:
+                    console.warn("HLS fatal network error, merecover...", data);
+                    hlsInstance.startLoad();
+                    break;
+                  case Hls.ErrorTypes.MEDIA_ERROR:
+                    console.warn("HLS fatal media error, merecover...", data);
+                    hlsInstance.recoverMediaError();
+                    break;
+                  default:
+                    console.error("HLS unrecoverable error, beralih ke native src:", data);
+                    hlsInstance.destroy();
+                    hlsInstance = null;
+                    videoPlayer.src = streamUrl;
+                    videoPlayer.load();
+                    videoPlayer.play().catch(() => {});
+                    break;
+                }
+              }
+            });
+          } else if (videoPlayer.canPlayType('application/vnd.apple.mpegurl')) {
+            // Native HLS fallback (strictly for mobile iOS Safari where MSE is unavailable)
+            if (hlsInstance) {
+              hlsInstance.destroy();
+              hlsInstance = null;
+            }
+            videoPlayer.src = streamUrl;
           } else {
             videoPlayer.src = streamUrl;
           }
@@ -388,8 +412,9 @@
 
         playerSection.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 
-        videoPlayer.play().catch(() => {
-          console.log("Autoplay dihalangi oleh iOS, klik tombol play manual.");
+        videoPlayer.play().catch((err) => {
+          console.log("Autoplay dihalangi kebijakan browser:", err);
+          showToast("Ketuk tombol Putar pada video untuk mulai");
         });
 
         saveToHistory({
@@ -534,6 +559,17 @@
     videoPlayer.addEventListener('loadedmetadata', () => {
       if (bufferBarContainer) bufferBarContainer.classList.remove('hidden');
       updateBufferIndicator();
+    });
+    videoPlayer.addEventListener('error', () => {
+      console.warn("Video element error encountered:", videoPlayer.error);
+      const err = videoPlayer.error;
+      let msg = "Terjadi gangguan saat memutar video.";
+      if (err) {
+        if (err.code === 2) msg = "Koneksi jaringan terputus saat memuat stream.";
+        else if (err.code === 3) msg = "Format video bermasalah pada browser ini.";
+        else if (err.code === 4) msg = "Tautan stream kadaluarsa atau format tidak didukung.";
+      }
+      showToast(msg);
     });
 
     toggleClearBtn();
