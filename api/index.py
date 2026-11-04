@@ -198,9 +198,11 @@ def extract_video_info(input_url_or_id: str) -> dict:
     input_str = input_url_or_id.strip()
     is_vidara = "vidara.to" in input_str or "vidwara.art" in input_str
 
-    if "http" in input_str:
-        m = ID_REGEX.search(input_str)
-        video_id = m.group(1) if m else input_str.rstrip("/").split("/")[-1].split("?")[0]
+    m = ID_REGEX.search(input_str)
+    if m:
+        video_id = m.group(1)
+    elif "/" in input_str:
+        video_id = input_str.rstrip("/").split("/")[-1].split("?")[0]
     else:
         video_id = input_str
 
