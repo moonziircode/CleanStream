@@ -225,6 +225,10 @@ def extract_video_info(input_url_or_id: str) -> dict:
     headers = {
         "User-Agent": USER_AGENT,
         "Referer": f"https://{target_host}/",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
         "Accept-Encoding": "identity",
         "Connection": "keep-alive"
     }
@@ -257,6 +261,8 @@ def extract_video_info(input_url_or_id: str) -> dict:
 
         # Step 2: Iframe handshake over the SAME TLS connection
         headers["Referer"] = f"https://{target_host}/e/{video_id}"
+        headers["Sec-Fetch-Dest"] = "iframe"
+        headers["Sec-Fetch-Site"] = "same-origin"
         conn.request("GET", iframe_path, headers=headers)
         resp2 = conn.getresponse()
         iframe_html = resp2.read().decode("utf-8", errors="ignore")
@@ -269,7 +275,11 @@ def extract_video_info(input_url_or_id: str) -> dict:
                     f"https://{target_host}{iframe_path}",
                     headers={
                         "User-Agent": USER_AGENT,
-                        "Referer": f"https://{target_host}/e/{video_id}"
+                        "Referer": f"https://{target_host}/e/{video_id}",
+                        "Sec-Fetch-Dest": "iframe",
+                        "Sec-Fetch-Mode": "navigate",
+                        "Sec-Fetch-Site": "same-origin",
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
                     }
                 )
                 with urllib.request.urlopen(fb_req, timeout=10) as fb_resp:
@@ -290,7 +300,11 @@ def extract_video_info(input_url_or_id: str) -> dict:
     # Step 3: Fetch player page for direct media source
     req3 = urllib.request.Request(player_path, headers={
         "User-Agent": USER_AGENT,
-        "Referer": f"https://{target_host}{iframe_path}"
+        "Referer": f"https://{target_host}{iframe_path}",
+        "Sec-Fetch-Dest": "iframe",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "same-origin",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
     })
 
     with urllib.request.urlopen(req3, timeout=12) as resp3:
@@ -315,7 +329,7 @@ def extract_video_info(input_url_or_id: str) -> dict:
         "is_hls": is_hls,
         "original_name": raw_source.split("/")[-1].split("?")[0],
         "poster": poster,
-        "embed_url": f"https://streamrizz.com/e/{video_id}"
+        "embed_url": f"https://{target_host}/e/{video_id}"
     }
 
     RESOLVE_CACHE.set(cache_key, result)
