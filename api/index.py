@@ -142,8 +142,9 @@ def rewrite_m3u8(content: str, base_url: str, proxy_prefix: str = "/api/stream?a
 ID_REGEX = re.compile(r"(?:/e/|/v/|/embed/|/d/|/)([a-zA-Z0-9_-]{6,32})(?:[/?#]|$)")
 IFRAME_ID_REGEX = re.compile(r"var iframeId = ['\"]([a-f0-9]+)['\"]")
 EMBED_TOKEN_REGEX = re.compile(r"var embedToken = ['\"]([^'\"]+)['\"]")
+SRC_REGEX = re.compile(r"(?:var\s+SRC|SRC)\s*=\s*['\"]([^'\"]+)['\"]")
 PLAYER_PATH_REGEX = re.compile(r"playerPath\s*=\s*['\"]([^'\"]+)['\"]")
-STREAM_PHP_REGEX = re.compile(r"https://streamrizz\.com/stream\.php\?[^\"'\s<>]+")
+STREAM_PHP_REGEX = re.compile(r"https?://(?:streamrizz\.com|jwplyr\.com)/stream\.php\?[^\"'\s<>]+")
 SOURCE_REGEX = re.compile(r"<source\s+[^>]*src=['\"]([^'\"]+)['\"]")
 VIDEO_SRC_REGEX = re.compile(r"<video\s+[^>]*src=['\"]([^'\"]+)['\"]")
 POSTER_REGEX = re.compile(r"poster=['\"]([^'\"]+)['\"]")
@@ -216,13 +217,14 @@ def extract_video_info(input_url_or_id: str) -> dict:
         RESOLVE_CACHE.set(cache_key, result)
         return result
 
-    # 3. Streamrizz Provider (Perform 3-step handshake with connection reuse)
+    # 3. Streamrizz / JWPLYR Provider (Perform 3-step handshake with connection reuse)
+    target_host = "jwplyr.com" if "jwplyr.com" in input_str else "streamrizz.com"
     ctx = ssl.create_default_context()
-    conn = http.client.HTTPSConnection("streamrizz.com", timeout=10, context=ctx)
+    conn = http.client.HTTPSConnection(target_host, timeout=10, context=ctx)
 
     headers = {
         "User-Agent": USER_AGENT,
-        "Referer": "https://streamrizz.com/",
+        "Referer": f"https://{target_host}/",
         "Accept-Encoding": "identity",
         "Connection": "keep-alive"
     }
@@ -233,17 +235,29 @@ def extract_video_info(input_url_or_id: str) -> dict:
         resp1 = conn.getresponse()
         embed_html = resp1.read().decode("utf-8", errors="ignore")
 
-        m_id = IFRAME_ID_REGEX.search(embed_html)
-        m_tok = EMBED_TOKEN_REGEX.search(embed_html)
-        if not m_id or not m_tok:
-            raise ValueError(f"Gagal mengekstrak token dari embed page (ID: {video_id})")
+        # Check for 404 Not Found or redirect to 404 from upstream immediately
+        loc = resp1.getheader("Location", "")
+        if resp1.status == 404 or "/404" in loc or "/404" in embed_html or "404 Not Found" in embed_html or "Page no longer exists" in embed_html:
+            raise ValueError(f"Video tidak ditemukan atau telah dihapus oleh penyedia (404 Not Found) [ID: {video_id}]")
 
-        iframe_id = m_id.group(1)
-        embed_token = m_tok.group(1)
+        # Step 1b: Extract iframe path (supports new 'var SRC = ...' and traditional iframeId/embedToken)
+        m_src = SRC_REGEX.search(embed_html)
+        if m_src:
+            iframe_path = m_src.group(1).replace(r"\u0026", "&").replace("&amp;", "&")
+            if not iframe_path.startswith("/"):
+                iframe_path = "/" + iframe_path
+        else:
+            m_id = IFRAME_ID_REGEX.search(embed_html)
+            m_tok = EMBED_TOKEN_REGEX.search(embed_html)
+            if not m_id or not m_tok:
+                raise ValueError(f"Gagal mengekstrak token dari embed page (ID: {video_id})")
+            iframe_id = m_id.group(1)
+            embed_token = m_tok.group(1)
+            iframe_path = f"/ip129jk?id={iframe_id}&t={embed_token}"
 
         # Step 2: Iframe handshake over the SAME TLS connection
-        headers["Referer"] = f"https://streamrizz.com/e/{video_id}"
-        conn.request("GET", f"/ip129jk?id={iframe_id}&t={embed_token}", headers=headers)
+        headers["Referer"] = f"https://{target_host}/e/{video_id}"
+        conn.request("GET", iframe_path, headers=headers)
         resp2 = conn.getresponse()
         iframe_html = resp2.read().decode("utf-8", errors="ignore")
 
@@ -252,10 +266,10 @@ def extract_video_info(input_url_or_id: str) -> dict:
             # Fallback: retry with fresh urllib request if keep-alive connection dropped or was empty
             try:
                 fb_req = urllib.request.Request(
-                    f"https://streamrizz.com/ip129jk?id={iframe_id}&t={embed_token}",
+                    f"https://{target_host}{iframe_path}",
                     headers={
                         "User-Agent": USER_AGENT,
-                        "Referer": f"https://streamrizz.com/e/{video_id}"
+                        "Referer": f"https://{target_host}/e/{video_id}"
                     }
                 )
                 with urllib.request.urlopen(fb_req, timeout=10) as fb_resp:
@@ -276,7 +290,7 @@ def extract_video_info(input_url_or_id: str) -> dict:
     # Step 3: Fetch player page for direct media source
     req3 = urllib.request.Request(player_path, headers={
         "User-Agent": USER_AGENT,
-        "Referer": f"https://streamrizz.com/ip129jk?id={iframe_id}&t={embed_token}"
+        "Referer": f"https://{target_host}{iframe_path}"
     })
 
     with urllib.request.urlopen(req3, timeout=12) as resp3:
@@ -375,7 +389,7 @@ def app(environ, start_response):
         parsed_target = urllib.parse.urlparse(target_url)
         target_netloc = parsed_target.netloc.lower()
 
-        if "streamrizz" in target_netloc:
+        if "streamrizz" in target_netloc or "jwplyr" in target_netloc:
             proxy_referer = "https://streamrizz.com/"
         elif "vidwara" in target_netloc or "97bf1.com" in target_netloc:
             proxy_referer = "https://vidwara.art/"
@@ -487,11 +501,14 @@ def app(environ, start_response):
             ])
             return [body]
         except Exception as e:
-            start_response("500 Internal Server Error", [
+            err_msg = str(e)
+            is_404 = "404" in err_msg or "tidak ditemukan" in err_msg.lower()
+            status_code = "404 Not Found" if is_404 else "500 Internal Server Error"
+            start_response(status_code, [
                 ("Content-Type", "application/json"),
                 ("Access-Control-Allow-Origin", "*")
             ])
-            return [json.dumps({"status": "error", "message": str(e)}).encode("utf-8")]
+            return [json.dumps({"status": "error", "message": err_msg}).encode("utf-8")]
 
     # --------------------------------------------------------------------------
     # Default Service Info Route

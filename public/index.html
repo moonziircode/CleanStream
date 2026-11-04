@@ -352,7 +352,7 @@
 
             hlsInstance = new Hls({
               enableWorker: true,
-              startLevel: -1,
+              startLevel: 0,                 // Fast startup on lightweight level first, then auto-scale
               capLevelToPlayerSize: true,
               maxBufferLength: 120,          // Load up to 120s ahead (like YouTube)
               maxMaxBufferLength: 300,       // Max buffer up to 5 minutes
