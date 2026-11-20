@@ -163,13 +163,7 @@ async function resolveStreamrizz(inputUrlOrId) {
     else if (rawHost.includes("streamrizz.com")) targetHost = "streamrizz.com";
   }
 
-  if (inputLower.includes("/d/")) {
-    preferredPath = "/d/";
-  }
-
-  const candidatePaths = preferredPath === "/d/"
-    ? [`/d/${videoId}`, `/e/${videoId}`]
-    : [`/e/${videoId}`, `/d/${videoId}`];
+  const candidatePaths = [`/e/${videoId}`, `/d/${videoId}`];
 
   const candidateHosts = [targetHost];
   for (const alt of ["filecoster.com", "streamrizz.com", "jwplyr.com"]) {
@@ -197,7 +191,8 @@ async function resolveStreamrizz(inputUrlOrId) {
             "Sec-Fetch-Dest": "document",
             "Sec-Fetch-Mode": "navigate",
             "Sec-Fetch-Site": "none"
-          }
+          },
+          signal: AbortSignal.timeout(6000)
         });
 
         if (resp1.status === 404) continue;
@@ -233,7 +228,10 @@ async function resolveStreamrizz(inputUrlOrId) {
         };
         if (cookie1) iframeHeaders["Cookie"] = cookie1;
 
-        const iframeResp = await fetch(`https://${host}${iframePath}`, { headers: iframeHeaders });
+        const iframeResp = await fetch(`https://${host}${iframePath}`, {
+          headers: iframeHeaders,
+          signal: AbortSignal.timeout(6000)
+        });
         const iframeHtml = await iframeResp.text();
         const cookie2 = iframeResp.headers.get("set-cookie") || cookie1;
 
@@ -257,7 +255,10 @@ async function resolveStreamrizz(inputUrlOrId) {
         };
         if (cookie2) playerHeaders["Cookie"] = cookie2;
 
-        const playerResp = await fetch(playerPath, { headers: playerHeaders });
+        const playerResp = await fetch(playerPath, {
+          headers: playerHeaders,
+          signal: AbortSignal.timeout(6000)
+        });
         const playerHtml = await playerResp.text();
 
         const matchSource = playerHtml.match(SOURCE_REGEX) || playerHtml.match(VIDEO_SRC_REGEX);

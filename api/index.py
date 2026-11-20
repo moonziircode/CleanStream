@@ -229,8 +229,7 @@ def extract_video_info(input_url_or_id: str) -> dict:
     elif "jwplyr.com" in input_lower:
         target_host = "jwplyr.com"
 
-    path_prefix = "/d/" if "/d/" in input_lower else "/e/"
-    candidate_paths = [f"{path_prefix}{video_id}", f"/e/{video_id}" if path_prefix == "/d/" else f"/d/{video_id}"]
+    candidate_paths = [f"/e/{video_id}", f"/d/{video_id}"]
     candidate_hosts = [target_host]
     for alt in ("filecoster.com", "streamrizz.com", "jwplyr.com"):
         if alt not in candidate_hosts:
