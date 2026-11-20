@@ -5,8 +5,10 @@ Optimized for: Ultra-fast TTFB, connection reuse, single-pass M3U8 rewriting,
 byte-range seeking, SSRF security, and serverless edge caching.
 """
 
+import base64
 import html
 import http.client
+import io
 import ipaddress
 import json
 import os
@@ -535,5 +537,78 @@ def app(environ, start_response):
     ])
     return [json.dumps({"status": "ok", "service": "CleanStream API (Optimized)"}).encode("utf-8")]
 
-# Vercel Serverless Function entrypoints
-handler = app
+# ==============================================================================
+# 6. AWS LAMBDA & NETLIFY SERVERLESS ADAPTER (Zero Dependencies)
+# ==============================================================================
+
+def lambda_handler(event, context=None):
+    """
+    Zero-dependency AWS Lambda / Netlify Serverless adapter for WSGI.
+    Converts Lambda/Netlify API Gateway events into WSGI environ and handles binary/chunk responses.
+    """
+    headers = event.get("headers") or {}
+    method = event.get("httpMethod", "GET").upper()
+    path = event.get("path", "/")
+
+    query_params = event.get("multiValueQueryStringParameters") or {}
+    if not query_params and event.get("queryStringParameters"):
+        query_params = {k: [v] for k, v in event["queryStringParameters"].items()}
+    query_string = urllib.parse.urlencode(query_params, doseq=True)
+
+    body_bytes = b""
+    if event.get("body"):
+        body_bytes = base64.b64decode(event["body"]) if event.get("isBase64Encoded") else event["body"].encode("utf-8")
+
+    environ = {
+        "REQUEST_METHOD": method,
+        "PATH_INFO": path,
+        "QUERY_STRING": query_string,
+        "SERVER_NAME": "localhost",
+        "SERVER_PORT": "443",
+        "SERVER_PROTOCOL": "HTTP/1.1",
+        "wsgi.version": (1, 0),
+        "wsgi.url_scheme": "https",
+        "wsgi.input": io.BytesIO(body_bytes),
+        "wsgi.errors": io.StringIO(),
+        "wsgi.multithread": False,
+        "wsgi.multiprocess": False,
+        "wsgi.run_once": False,
+        "RAW_URI": f"{path}?{query_string}" if query_string else path
+    }
+    for k, v in headers.items():
+        k_upper = k.upper().replace("-", "_")
+        if k_upper in ("CONTENT_TYPE", "CONTENT_LENGTH"):
+            environ[k_upper] = v
+        else:
+            environ[f"HTTP_{k_upper}"] = v
+
+    response_status = [200]
+    response_headers = []
+
+    def start_response(status, response_hdrs, exc_info=None):
+        response_status[0] = int(status.split()[0])
+        response_headers.extend(response_hdrs)
+
+    res_body = app(environ, start_response)
+    body_data = b"".join(res_body)
+
+    out_headers = {k: v for k, v in response_headers}
+    content_type = out_headers.get("Content-Type", "")
+    is_binary = any(t in content_type.lower() for t in ("video/", "application/octet-stream", "image/"))
+
+    return {
+        "statusCode": response_status[0],
+        "headers": out_headers,
+        "body": base64.b64encode(body_data).decode("utf-8") if is_binary else body_data.decode("utf-8", errors="ignore"),
+        "isBase64Encoded": is_binary
+    }
+
+def handler(event, context=None):
+    """
+    Universal serverless entrypoint:
+    - If called as WSGI (context is callable / Vercel), runs standard WSGI app.
+    - If called as AWS Lambda / Netlify Function (event is dict), runs lambda_handler.
+    """
+    if callable(context):
+        return app(event, context)
+    return lambda_handler(event, context)
