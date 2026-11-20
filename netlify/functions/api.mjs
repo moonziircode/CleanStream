@@ -354,23 +354,51 @@ export const handler = async (event, context) => {
       "Referer": proxyReferer
     };
 
-    const rangeHeader = event.headers?.range || event.headers?.Range;
-    if (rangeHeader) {
-      reqHeaders["Range"] = rangeHeader;
+    const isM3u8 = targetUrlLower.includes(".m3u8");
+
+    // Range clamping to prevent serverless 6MB payload limit & 504 timeouts on large MP4 files
+    const MAX_CHUNK = 2 * 1024 * 1024; // 2 MB per chunk
+    const clientRange = event.headers?.range || event.headers?.Range || "";
+    let upstreamRange = null;
+
+    if (!isM3u8 && method !== "HEAD") {
+      if (clientRange) {
+        const match = clientRange.match(/bytes=(\d+)-(\d+)?/i);
+        if (match) {
+          const start = parseInt(match[1], 10);
+          let end = match[2] ? parseInt(match[2], 10) : null;
+          if (end === null || (end - start + 1) > MAX_CHUNK) {
+            end = start + MAX_CHUNK - 1;
+          }
+          upstreamRange = `bytes=${start}-${end}`;
+        } else {
+          upstreamRange = clientRange;
+        }
+      } else if (!targetUrlLower.includes(".ts")) {
+        // If client didn't specify Range for MP4, request first chunk to prevent downloading entire 100MB+ file
+        upstreamRange = `bytes=0-${MAX_CHUNK - 1}`;
+      }
+    }
+
+    if (upstreamRange) {
+      reqHeaders["Range"] = upstreamRange;
+    } else if (clientRange) {
+      reqHeaders["Range"] = clientRange;
     }
 
     try {
       const upstreamResp = await fetch(targetUrl, {
         method: method === "HEAD" ? "HEAD" : "GET",
-        headers: reqHeaders
+        headers: reqHeaders,
+        signal: AbortSignal.timeout(10000)
       });
 
       const statusCode = upstreamResp.status;
       const contentType = upstreamResp.headers.get("content-type") || "";
-      const isM3u8 = targetUrlLower.includes(".m3u8") || contentType.toLowerCase().includes("mpegurl");
+      const isM3u8Resp = isM3u8 || contentType.toLowerCase().includes("mpegurl");
 
       // Case A: M3U8 Playlist (Rewrite URLs)
-      if (isM3u8 && method !== "HEAD") {
+      if (isM3u8Resp && method !== "HEAD") {
         const m3u8Content = await upstreamResp.text();
         const rewritten = rewriteM3U8(m3u8Content, targetUrl, "/api/stream?action=stream&url=");
         return {
@@ -421,18 +449,19 @@ export const handler = async (event, context) => {
         "Access-Control-Allow-Origin": "*",
         "Access-Control-Expose-Headers": "Content-Length, Content-Range, Accept-Ranges",
         "Accept-Ranges": "bytes",
+        "Content-Length": String(buffer.length),
         "Cache-Control": targetUrlLower.includes(".ts") ? "public, max-age=86400, immutable" : "public, max-age=3600"
       };
 
-      for (const [k, v] of upstreamResp.headers.entries()) {
-        const kl = k.toLowerCase();
-        if (kl === "content-range" || kl === "content-length" || kl === "etag" || kl === "last-modified") {
-          outHeaders[k] = v;
-        }
+      const upstreamContentRange = upstreamResp.headers.get("content-range");
+      if (upstreamContentRange) {
+        outHeaders["Content-Range"] = upstreamContentRange;
       }
+      const upstreamEtag = upstreamResp.headers.get("etag");
+      if (upstreamEtag) outHeaders["ETag"] = upstreamEtag;
 
       return {
-        statusCode: statusCode === 206 ? 206 : 200,
+        statusCode: statusCode === 206 || upstreamContentRange ? 206 : statusCode,
         headers: outHeaders,
         body: buffer.toString("base64"),
         isBase64Encoded: true

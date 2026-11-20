@@ -431,7 +431,27 @@ def app(environ, start_response):
             "User-Agent": USER_AGENT,
             "Referer": proxy_referer
         }
-        if range_header:
+        is_m3u8 = ".m3u8" in target_url_lower
+        max_chunk = 2 * 1024 * 1024  # 2 MB chunk clamp
+        upstream_range = None
+
+        if not is_m3u8 and method != "HEAD":
+            if range_header:
+                m_range = re.search(r"bytes=(\d+)-(\d+)?", range_header, re.IGNORECASE)
+                if m_range:
+                    start_b = int(m_range.group(1))
+                    end_b = int(m_range.group(2)) if m_range.group(2) else None
+                    if end_b is None or (end_b - start_b + 1) > max_chunk:
+                        end_b = start_b + max_chunk - 1
+                    upstream_range = f"bytes={start_b}-{end_b}"
+                else:
+                    upstream_range = range_header
+            elif ".ts" not in target_url_lower:
+                upstream_range = f"bytes=0-{max_chunk - 1}"
+
+        if upstream_range:
+            req_headers["Range"] = upstream_range
+        elif range_header:
             req_headers["Range"] = range_header
 
         clean_target = sanitize_url(target_url)
