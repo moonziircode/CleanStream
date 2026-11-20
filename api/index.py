@@ -221,123 +221,135 @@ def extract_video_info(input_url_or_id: str) -> dict:
         RESOLVE_CACHE.set(cache_key, result)
         return result
 
-    # 3. Streamrizz / JWPLYR Provider (Perform 3-step handshake with connection reuse)
-    target_host = "jwplyr.com" if "jwplyr.com" in input_str else "streamrizz.com"
+    # 3. Streamrizz / JWPLYR / Filecoster Provider
+    input_lower = input_str.lower()
+    target_host = "streamrizz.com"
+    if "filecoster.com" in input_lower or "vidoy" in input_lower:
+        target_host = "filecoster.com"
+    elif "jwplyr.com" in input_lower:
+        target_host = "jwplyr.com"
+
+    path_prefix = "/d/" if "/d/" in input_lower else "/e/"
+    candidate_paths = [f"{path_prefix}{video_id}", f"/e/{video_id}" if path_prefix == "/d/" else f"/d/{video_id}"]
+    candidate_hosts = [target_host]
+    for alt in ("filecoster.com", "streamrizz.com", "jwplyr.com"):
+        if alt not in candidate_hosts:
+            candidate_hosts.append(alt)
+
     ctx = ssl.create_default_context()
-    conn = http.client.HTTPSConnection(target_host, timeout=10, context=ctx)
+    last_err = None
 
-    headers = {
-        "User-Agent": USER_AGENT,
-        "Referer": f"https://{target_host}/",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Accept-Encoding": "identity",
-        "Connection": "keep-alive"
-    }
-
-    try:
-        # Step 1: Embed page
-        conn.request("GET", f"/e/{video_id}", headers=headers)
-        resp1 = conn.getresponse()
-        embed_html = resp1.read().decode("utf-8", errors="ignore")
-
-        # Check for 404 Not Found or redirect to 404 from upstream immediately
-        loc = resp1.getheader("Location", "")
-        if resp1.status == 404 or "/404" in loc or "/404" in embed_html or "404 Not Found" in embed_html or "Page no longer exists" in embed_html:
-            raise ValueError(f"Video tidak ditemukan atau telah dihapus oleh penyedia (404 Not Found) [ID: {video_id}]")
-
-        # Step 1b: Extract iframe path (supports new 'var SRC = ...' and traditional iframeId/embedToken)
-        m_src = SRC_REGEX.search(embed_html)
-        if m_src:
-            iframe_path = m_src.group(1).replace(r"\u0026", "&").replace("&amp;", "&")
-            if not iframe_path.startswith("/"):
-                iframe_path = "/" + iframe_path
-        else:
-            m_id = IFRAME_ID_REGEX.search(embed_html)
-            m_tok = EMBED_TOKEN_REGEX.search(embed_html)
-            if not m_id or not m_tok:
-                raise ValueError(f"Gagal mengekstrak token dari embed page (ID: {video_id})")
-            iframe_id = m_id.group(1)
-            embed_token = m_tok.group(1)
-            iframe_path = f"/ip129jk?id={iframe_id}&t={embed_token}"
-
-        # Step 2: Iframe handshake over the SAME TLS connection
-        headers["Referer"] = f"https://{target_host}/e/{video_id}"
-        headers["Sec-Fetch-Dest"] = "iframe"
-        headers["Sec-Fetch-Site"] = "same-origin"
-        conn.request("GET", iframe_path, headers=headers)
-        resp2 = conn.getresponse()
-        iframe_html = resp2.read().decode("utf-8", errors="ignore")
-
-        m_path = PLAYER_PATH_REGEX.search(iframe_html) or STREAM_PHP_REGEX.search(iframe_html)
-        if not m_path:
-            # Fallback: retry with fresh urllib request if keep-alive connection dropped or was empty
+    for host in candidate_hosts:
+        for p in candidate_paths:
             try:
-                fb_req = urllib.request.Request(
-                    f"https://{target_host}{iframe_path}",
-                    headers={
-                        "User-Agent": USER_AGENT,
-                        "Referer": f"https://{target_host}/e/{video_id}",
-                        "Sec-Fetch-Dest": "iframe",
-                        "Sec-Fetch-Mode": "navigate",
-                        "Sec-Fetch-Site": "same-origin",
-                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-                    }
-                )
-                with urllib.request.urlopen(fb_req, timeout=10) as fb_resp:
-                    iframe_html = fb_resp.read().decode("utf-8", errors="ignore")
+                conn = http.client.HTTPSConnection(host, timeout=10, context=ctx)
+                headers = {
+                    "User-Agent": USER_AGENT,
+                    "Referer": f"https://{host}/",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Sec-Fetch-Dest": "document",
+                    "Sec-Fetch-Mode": "navigate",
+                    "Sec-Fetch-Site": "none",
+                    "Accept-Encoding": "identity",
+                    "Connection": "keep-alive"
+                }
+
+                # Step 1: Embed page
+                conn.request("GET", p, headers=headers)
+                resp1 = conn.getresponse()
+                embed_html = resp1.read().decode("utf-8", errors="ignore")
+
+                if resp1.status == 404 or "/404" in embed_html or "404 Not Found" in embed_html or "Page no longer exists" in embed_html:
+                    conn.close()
+                    continue
+
+                cookie1 = resp1.getheader("Set-Cookie", "")
+
+                # Step 1b: Extract iframe path
+                m_src = SRC_REGEX.search(embed_html)
+                if m_src:
+                    iframe_path = m_src.group(1).replace(r"\u0026", "&").replace("&amp;", "&")
+                    if not iframe_path.startswith("/"):
+                        iframe_path = "/" + iframe_path
+                else:
+                    m_id = IFRAME_ID_REGEX.search(embed_html)
+                    m_tok = EMBED_TOKEN_REGEX.search(embed_html)
+                    if not m_id or not m_tok:
+                        conn.close()
+                        continue
+                    iframe_id = m_id.group(1)
+                    embed_token = m_tok.group(1)
+                    iframe_path = f"/ip129jk?id={iframe_id}&t={embed_token}"
+
+                # Step 2: Iframe handshake
+                headers["Referer"] = f"https://{host}{p}"
+                headers["Sec-Fetch-Dest"] = "iframe"
+                headers["Sec-Fetch-Site"] = "same-origin"
+                if cookie1:
+                    headers["Cookie"] = cookie1
+
+                conn.request("GET", iframe_path, headers=headers)
+                resp2 = conn.getresponse()
+                iframe_html = resp2.read().decode("utf-8", errors="ignore")
+                cookie2 = resp2.getheader("Set-Cookie", cookie1)
+
                 m_path = PLAYER_PATH_REGEX.search(iframe_html) or STREAM_PHP_REGEX.search(iframe_html)
-            except Exception:
-                pass
+                if not m_path:
+                    conn.close()
+                    continue
 
-        if not m_path:
-            raise ValueError(f"Gagal menemukan playerPath di halaman iframe (ID: {video_id})")
+                raw_path = m_path.group(1 if m_path.lastindex else 0)
+                player_path = raw_path.replace(r"\u0026", "&").replace("&amp;", "&")
+                if not player_path.startswith("http"):
+                    player_path = f"https://{host}{'' if player_path.startswith('/') else '/'}{player_path}"
 
-        raw_path = m_path.group(1 if m_path.lastindex else 0)
-        player_path = raw_path.replace(r"\u0026", "&").replace("&amp;", "&")
+                conn.close()
 
-    finally:
-        conn.close()
+                # Step 3: Fetch player page for direct media source
+                req3_headers = {
+                    "User-Agent": USER_AGENT,
+                    "Referer": f"https://{host}{iframe_path}",
+                    "Sec-Fetch-Dest": "iframe",
+                    "Sec-Fetch-Mode": "navigate",
+                    "Sec-Fetch-Site": "same-origin",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+                }
+                if cookie2:
+                    req3_headers["Cookie"] = cookie2
 
-    # Step 3: Fetch player page for direct media source
-    req3 = urllib.request.Request(player_path, headers={
-        "User-Agent": USER_AGENT,
-        "Referer": f"https://{target_host}{iframe_path}",
-        "Sec-Fetch-Dest": "iframe",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "same-origin",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-    })
+                req3 = urllib.request.Request(player_path, headers=req3_headers)
+                with urllib.request.urlopen(req3, timeout=12) as resp3:
+                    stream_html = resp3.read().decode("utf-8", errors="ignore")
 
-    with urllib.request.urlopen(req3, timeout=12) as resp3:
-        stream_html = resp3.read().decode("utf-8", errors="ignore")
+                source_match = SOURCE_REGEX.search(stream_html) or VIDEO_SRC_REGEX.search(stream_html)
+                if not source_match:
+                    continue
 
-    source_match = SOURCE_REGEX.search(stream_html) or VIDEO_SRC_REGEX.search(stream_html)
-    if not source_match:
-        raise ValueError("Gagal menemukan sumber video langsung pada halaman player")
+                raw_source = source_match.group(1).strip()
+                poster_match = POSTER_REGEX.search(stream_html)
+                title_match = TITLE_REGEX.search(stream_html)
 
-    raw_source = source_match.group(1).strip()
-    poster_match = POSTER_REGEX.search(stream_html)
-    title_match = TITLE_REGEX.search(stream_html)
+                poster = poster_match.group(1) if poster_match else f"https://i.{host}/image/{video_id}.jpg"
+                title = html.unescape(title_match.group(1).strip()) if title_match else f"Video {video_id}"
+                is_hls = ".m3u8" in raw_source.lower()
 
-    poster = poster_match.group(1) if poster_match else f"https://i.streamrizz.com/image/{video_id}.jpg"
-    title = html.unescape(title_match.group(1).strip()) if title_match else f"Video {video_id}"
-    is_hls = ".m3u8" in raw_source.lower()
+                result = {
+                    "video_id": video_id,
+                    "title": title,
+                    "raw_mp4": raw_source,
+                    "is_hls": is_hls,
+                    "original_name": raw_source.split("/")[-1].split("?")[0],
+                    "poster": poster,
+                    "embed_url": f"https://{host}{p}"
+                }
 
-    result = {
-        "video_id": video_id,
-        "title": title,
-        "raw_mp4": raw_source,
-        "is_hls": is_hls,
-        "original_name": raw_source.split("/")[-1].split("?")[0],
-        "poster": poster,
-        "embed_url": f"https://{target_host}/e/{video_id}"
-    }
+                RESOLVE_CACHE.set(cache_key, result)
+                return result
 
-    RESOLVE_CACHE.set(cache_key, result)
-    return result
+            except Exception as e:
+                last_err = e
+
+    raise last_err or ValueError(f"Video tidak ditemukan atau telah dihapus oleh penyedia (404 Not Found) [ID: {video_id}]")
 
 
 # ==============================================================================
@@ -407,8 +419,10 @@ def app(environ, start_response):
         parsed_target = urllib.parse.urlparse(target_url)
         target_netloc = parsed_target.netloc.lower()
 
-        if "streamrizz" in target_netloc or "jwplyr" in target_netloc:
+        if "streamrizz" in target_netloc or "jwplyr" in target_netloc or "overfetch" in target_netloc:
             proxy_referer = "https://streamrizz.com/"
+        elif "filecoster" in target_netloc or "vidoy" in target_netloc:
+            proxy_referer = "https://filecoster.com/"
         elif "vidwara" in target_netloc or "97bf1.com" in target_netloc:
             proxy_referer = "https://vidwara.art/"
         else:

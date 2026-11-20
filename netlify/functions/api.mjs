@@ -150,7 +150,32 @@ async function resolveStreamrizz(inputUrlOrId) {
     return result;
   }
 
-  const targetHost = inputStr.includes("jwplyr.com") ? "jwplyr.com" : "streamrizz.com";
+  const inputLower = inputStr.toLowerCase();
+  let targetHost = "streamrizz.com";
+  let preferredPath = "/e/";
+
+  const hostMatch = inputStr.match(/(?:https?:\/\/)?([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
+  if (hostMatch) {
+    const rawHost = hostMatch[1].toLowerCase();
+    if (rawHost.includes("filecoster.com")) targetHost = "filecoster.com";
+    else if (rawHost.includes("jwplyr.com")) targetHost = "jwplyr.com";
+    else if (rawHost.includes("vidoy")) targetHost = "filecoster.com";
+    else if (rawHost.includes("streamrizz.com")) targetHost = "streamrizz.com";
+  }
+
+  if (inputLower.includes("/d/")) {
+    preferredPath = "/d/";
+  }
+
+  const candidatePaths = preferredPath === "/d/"
+    ? [`/d/${videoId}`, `/e/${videoId}`]
+    : [`/e/${videoId}`, `/d/${videoId}`];
+
+  const candidateHosts = [targetHost];
+  for (const alt of ["filecoster.com", "streamrizz.com", "jwplyr.com"]) {
+    if (!candidateHosts.includes(alt)) candidateHosts.push(alt);
+  }
+
   const baseHeaders = {
     "User-Agent": USER_AGENT,
     "Referer": `https://${targetHost}/`,
@@ -160,117 +185,113 @@ async function resolveStreamrizz(inputUrlOrId) {
     "Sec-Fetch-Site": "none"
   };
 
-  // Step 1: Fetch Embed Page
-  const hosts = targetHost === "jwplyr.com" ? ["jwplyr.com", "streamrizz.com"] : ["streamrizz.com", "jwplyr.com"];
   let lastErr = null;
 
-  for (const host of hosts) {
-    try {
-      const resp1 = await fetch(`https://${host}/e/${videoId}`, {
-        headers: {
+  for (const host of candidateHosts) {
+    for (const p of candidatePaths) {
+      try {
+        const resp1 = await fetch(`https://${host}${p}`, {
+          headers: {
+            ...baseHeaders,
+            "Referer": `https://${host}/`,
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none"
+          }
+        });
+
+        if (resp1.status === 404) continue;
+        const embedHtml = await resp1.text();
+        if (embedHtml.includes("/404") || embedHtml.includes("404 Not Found") || embedHtml.includes("Page no longer exists")) {
+          continue;
+        }
+
+        const cookie1 = resp1.headers.get("set-cookie") || "";
+
+        // Step 1b: Extract iframe path
+        let iframePath = "";
+        const matchSrc = embedHtml.match(SRC_REGEX);
+        if (matchSrc) {
+          iframePath = matchSrc[1].replace(/\\u0026/g, "&").replace(/&amp;/g, "&");
+          if (!iframePath.startsWith("/")) iframePath = "/" + iframePath;
+        } else {
+          const matchIframeId = embedHtml.match(IFRAME_ID_REGEX);
+          const matchEmbedToken = embedHtml.match(EMBED_TOKEN_REGEX);
+          if (!matchIframeId || !matchEmbedToken) {
+            continue;
+          }
+          iframePath = `/ip129jk?id=${matchIframeId[1]}&t=${matchEmbedToken[1]}`;
+        }
+
+        // Step 2: Fetch Iframe Handshake
+        const iframeHeaders = {
           ...baseHeaders,
-          "Referer": `https://${host}/`,
-          "Sec-Fetch-Dest": "document",
+          "Referer": `https://${host}${p}`,
+          "Sec-Fetch-Dest": "iframe",
           "Sec-Fetch-Mode": "navigate",
-          "Sec-Fetch-Site": "none"
+          "Sec-Fetch-Site": "same-origin"
+        };
+        if (cookie1) iframeHeaders["Cookie"] = cookie1;
+
+        const iframeResp = await fetch(`https://${host}${iframePath}`, { headers: iframeHeaders });
+        const iframeHtml = await iframeResp.text();
+        const cookie2 = iframeResp.headers.get("set-cookie") || cookie1;
+
+        let playerPath = "";
+        const matchPlayerPath = iframeHtml.match(PLAYER_PATH_REGEX) || iframeHtml.match(STREAM_PHP_REGEX);
+        if (!matchPlayerPath) {
+          continue;
         }
-      });
-
-      if (resp1.status === 404) {
-        throw new Error(`Video tidak ditemukan atau telah dihapus oleh penyedia (404 Not Found) [ID: ${videoId}]`);
-      }
-
-      const embedHtml = await resp1.text();
-      if (embedHtml.includes("/404") || embedHtml.includes("404 Not Found") || embedHtml.includes("Page no longer exists")) {
-        throw new Error(`Video tidak ditemukan atau telah dihapus oleh penyedia (404 Not Found) [ID: ${videoId}]`);
-      }
-
-      const cookie1 = resp1.headers.get("set-cookie") || "";
-
-      // Step 1b: Extract iframe path
-      let iframePath = "";
-      const matchSrc = embedHtml.match(SRC_REGEX);
-      if (matchSrc) {
-        iframePath = matchSrc[1].replace(/\\u0026/g, "&").replace(/&amp;/g, "&");
-        if (!iframePath.startsWith("/")) iframePath = "/" + iframePath;
-      } else {
-        const matchIframeId = embedHtml.match(IFRAME_ID_REGEX);
-        const matchEmbedToken = embedHtml.match(EMBED_TOKEN_REGEX);
-        if (!matchIframeId || !matchEmbedToken) {
-          throw new Error(`Gagal mengekstrak token dari embed page (host: ${host}, status: ${resp1.status}): ${embedHtml.replace(/\s+/g, ' ').slice(0, 300)}`);
+        playerPath = (matchPlayerPath[1] || matchPlayerPath[0]).replace(/\\u0026/g, "&").replace(/&amp;/g, "&");
+        if (!playerPath.startsWith("http")) {
+          playerPath = `https://${host}${playerPath.startsWith("/") ? "" : "/"}${playerPath}`;
         }
-        iframePath = `/ip129jk?id=${matchIframeId[1]}&t=${matchEmbedToken[1]}`;
+
+        // Step 3: Fetch Player Page for Media Source
+        const playerHeaders = {
+          ...baseHeaders,
+          "Referer": `https://${host}${iframePath}`,
+          "Sec-Fetch-Dest": "iframe",
+          "Sec-Fetch-Mode": "navigate",
+          "Sec-Fetch-Site": "same-origin"
+        };
+        if (cookie2) playerHeaders["Cookie"] = cookie2;
+
+        const playerResp = await fetch(playerPath, { headers: playerHeaders });
+        const playerHtml = await playerResp.text();
+
+        const matchSource = playerHtml.match(SOURCE_REGEX) || playerHtml.match(VIDEO_SRC_REGEX);
+        if (!matchSource) {
+          continue;
+        }
+
+        const rawSource = matchSource[1].trim();
+        const matchPoster = playerHtml.match(POSTER_REGEX);
+        const matchTitle = playerHtml.match(TITLE_REGEX);
+
+        const poster = matchPoster ? matchPoster[1] : `https://i.${host}/image/${videoId}.jpg`;
+        const title = matchTitle ? matchTitle[1].replace(/&#(\d+);/g, (_, dec) => String.fromCharCode(dec)).trim() : `Video ${videoId}`;
+        const isHls = rawSource.toLowerCase().includes(".m3u8");
+
+        const result = {
+          video_id: videoId,
+          title,
+          raw_mp4: rawSource,
+          is_hls: isHls,
+          original_name: rawSource.split("/").pop().split("?")[0],
+          poster,
+          embed_url: `https://${host}${p}`
+        };
+
+        setCache(cacheKey, result);
+        return result;
+      } catch (err) {
+        lastErr = err;
       }
-
-      // Step 2: Fetch Iframe Handshake
-      const iframeHeaders = {
-        ...baseHeaders,
-        "Referer": `https://${host}/e/${videoId}`,
-        "Sec-Fetch-Dest": "iframe",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "same-origin"
-      };
-      if (cookie1) iframeHeaders["Cookie"] = cookie1;
-
-      const iframeResp = await fetch(`https://${host}${iframePath}`, { headers: iframeHeaders });
-      const iframeHtml = await iframeResp.text();
-      const cookie2 = iframeResp.headers.get("set-cookie") || cookie1;
-
-      let playerPath = "";
-      const matchPlayerPath = iframeHtml.match(PLAYER_PATH_REGEX) || iframeHtml.match(STREAM_PHP_REGEX);
-      if (!matchPlayerPath) {
-        throw new Error(`Gagal menemukan playerPath di halaman iframe (host: ${host}): ${iframeHtml.replace(/\s+/g, ' ').slice(0, 300)}`);
-      }
-      playerPath = (matchPlayerPath[1] || matchPlayerPath[0]).replace(/\\u0026/g, "&").replace(/&amp;/g, "&");
-      if (!playerPath.startsWith("http")) {
-        playerPath = `https://${host}${playerPath.startsWith("/") ? "" : "/"}${playerPath}`;
-      }
-
-      // Step 3: Fetch Player Page for Media Source
-      const playerHeaders = {
-        ...baseHeaders,
-        "Referer": `https://${host}${iframePath}`,
-        "Sec-Fetch-Dest": "iframe",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "same-origin"
-      };
-      if (cookie2) playerHeaders["Cookie"] = cookie2;
-
-      const playerResp = await fetch(playerPath, { headers: playerHeaders });
-      const playerHtml = await playerResp.text();
-
-      const matchSource = playerHtml.match(SOURCE_REGEX) || playerHtml.match(VIDEO_SRC_REGEX);
-      if (!matchSource) {
-        throw new Error(`Gagal menemukan sumber video langsung pada halaman player: ${playerHtml.replace(/\s+/g, ' ').slice(0, 300)}`);
-      }
-
-      const rawSource = matchSource[1].trim();
-      const matchPoster = playerHtml.match(POSTER_REGEX);
-      const matchTitle = playerHtml.match(TITLE_REGEX);
-
-      const poster = matchPoster ? matchPoster[1] : `https://i.streamrizz.com/image/${videoId}.jpg`;
-      const title = matchTitle ? matchTitle[1].replace(/&#(\d+);/g, (_, dec) => String.fromCharCode(dec)).trim() : `Video ${videoId}`;
-      const isHls = rawSource.toLowerCase().includes(".m3u8");
-
-      const result = {
-        video_id: videoId,
-        title,
-        raw_mp4: rawSource,
-        is_hls: isHls,
-        original_name: rawSource.split("/").pop().split("?")[0],
-        poster,
-        embed_url: `https://${host}/e/${videoId}`
-      };
-
-      setCache(cacheKey, result);
-      return result;
-    } catch (err) {
-      lastErr = err;
-      if (err.message && err.message.includes("404")) throw err;
     }
   }
 
-  throw lastErr || new Error(`Gagal memproses video ${videoId}`);
+  throw lastErr || new Error(`Video tidak ditemukan atau telah dihapus oleh penyedia (404 Not Found) [ID: ${videoId}]`);
 }
 
 export const handler = async (event, context) => {
@@ -319,8 +340,10 @@ export const handler = async (event, context) => {
     const parsedTarget = new URL(targetUrl);
     const targetNetloc = parsedTarget.hostname.toLowerCase();
     let proxyReferer = `${parsedTarget.protocol}//${parsedTarget.hostname}/`;
-    if (targetNetloc.includes("streamrizz") || targetNetloc.includes("jwplyr")) {
+    if (targetNetloc.includes("streamrizz") || targetNetloc.includes("jwplyr") || targetNetloc.includes("overfetch")) {
       proxyReferer = "https://streamrizz.com/";
+    } else if (targetNetloc.includes("filecoster") || targetNetloc.includes("vidoy")) {
+      proxyReferer = "https://filecoster.com/";
     } else if (targetNetloc.includes("vidwara") || targetNetloc.includes("97bf1.com")) {
       proxyReferer = "https://vidwara.art/";
     }
